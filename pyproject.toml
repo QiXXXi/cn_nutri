@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cn-nutri"
+version = "0.1.0"
+description = "中文版 nutrimatic：按「逐字属性」（韵母/声调/笔画/结构/部件）反查汉语词语"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []            # 纯标准库，零第三方依赖
+
+[project.scripts]
+cn-nutri = "cn_nutri.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cn_nutri = ["web/*.html", "web/*.js", "web/*.css", "web/*.json",
+            # 客户端词库：corpus.bin 约 12.9 MB，tables.json 是词汇表，
+            # components.json 是部件面板。三个都在，网页才不用连后端。
+            "web/data/*.bin", "web/data/*.json",
+            # 难输入部件的内置子集字体（含 OFL 许可证，必须随包分发）
+            "web/fonts/*.ttf", "web/fonts/*.otf", "web/fonts/*.css",
+            "web/fonts/*.txt", "web/fonts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

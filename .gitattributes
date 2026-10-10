@@ -1,0 +1,20 @@
+# 本机 core.autocrlf=true。文本文件按仓库里的 LF 存取是好事，但词库和字体是二进制，
+# 一旦被当文本转行尾就彻底坏了——而且坏了不会报错，只会算出一堆错结果。显式标死。
+*.bin   binary
+*.ttf   binary
+*.otf   binary
+*.db    binary
+*.zip   binary
+
+# 文本：仓库里统一 LF，检出时按平台
+*.py    text eol=lf
+*.js    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+
+# GitHub 语言统计：词库是生成物，别让它把 JS/Python 的占比冲掉
+src/cn_nutri/web/data/*.bin linguist-generated=true
+data/cn_nutri.db           linguist-generated=true

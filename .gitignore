@@ -1,0 +1,22 @@
+# 原始语料：194 MB，且全部可由 tools/download_data.py 重新抓取。
+# 仓库里只带构建产物（data/cn_nutri.db 与 src/cn_nutri/web/data/）。
+data_raw/
+
+# 抓取脚本的断点续抓缓存与日志
+*.cache.json
+fetch_*.log
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cn_nutri —— 中文版 nutrimatic</title>
+<!-- 179 个难输入部件的子集字体（OFL，31 KB）。unicode-range 限定在系统字体没有的
+     那些码位上，所以普通页面根本不会去下载它。详见 fonts/README.md -->
+<link rel="stylesheet" href="fonts/parts.css">
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e8ee; --dim:#8b93a5; --accent:#5ac8fa; --accent2:#b48ead;
+    --hit:#ffd166; --ok:#63d297; --warn:#e8b04b; --err:#f2757a;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f7f9; --panel:#fff; --panel2:#f0f2f5; --line:#dde1e8;
+           --fg:#1b1f27; --dim:#6b7280; --accent:#0b7285; --accent2:#8250df;
+           --hit:#b45309; --ok:#0f766e; --warn:#a16207; --err:#b91c1c; }
+  }
+  *{box-sizing:border-box}
+  /* "cn-nutri-parts" 放最后：它只声明了系统字体没有的那 179 个码位 */
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.6 system-ui,-apple-system,"Segoe UI","Noto Sans CJK SC",
+       "Microsoft YaHei","cn-nutri-parts",sans-serif}
+  header{padding:18px 22px 10px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:19px;font-weight:650;letter-spacing:.2px}
+  h1 small{font-weight:400;color:var(--dim);font-size:13px;margin-left:10px}
+  main{padding:16px 22px 60px;max-width:1180px;margin:0 auto}
+  section{background:var(--panel);border:1px solid var(--line);
+          border-radius:var(--radius);padding:14px 16px;margin-bottom:14px}
+  h2{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--dim);
+     text-transform:uppercase;letter-spacing:.8px}
+  textarea{width:100%;min-height:62px;resize:vertical;padding:10px 12px;
+    font:16px/1.5 ui-monospace,"Cascadia Code",Consolas,"Noto Sans Mono CJK SC",
+         "cn-nutri-parts",monospace;
+    background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;outline:none}
+  textarea:focus,input:focus{border-color:var(--accent)}
+  input[type=text]{padding:5px 8px;background:var(--panel2);color:var(--fg);
+    border:1px solid var(--line);border-radius:6px;outline:none;
+    font:14px ui-monospace,Consolas,monospace}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:5px 11px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.on{background:var(--accent);color:#06121a;border-color:var(--accent);
+    font-weight:600}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .chips{display:flex;gap:4px;flex-wrap:wrap}
+  .chips button{padding:2px 7px;font-size:12px}
+  .notice{margin-top:8px;font-size:13px}
+  .notice.warn{color:var(--warn)} .notice.err{color:var(--err)}
+  .notice.dim{color:var(--dim)}
+  .caret{font-family:ui-monospace,Consolas,monospace;white-space:pre;color:var(--err)}
+  /* 逐字表单 */
+  #slots{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px}
+  .slot{min-width:212px;background:var(--panel2);border:1px solid var(--line);
+        border-radius:8px;padding:9px 10px}
+  .slot.any{border-style:dashed;opacity:.85}
+  .slot h3{margin:0 0 7px;font-size:12px;color:var(--dim);font-weight:600;
+     display:flex;justify-content:space-between;align-items:center}
+  .slot h3 button{padding:0 6px;font-size:14px;line-height:1.3;border:none;
+     background:transparent;color:var(--dim)}
+  .slot h3 button:hover{color:var(--err)}
+  .fld{margin-bottom:6px}
+  .fld label{display:block;font-size:11px;color:var(--dim);margin-bottom:2px}
+  .fld input[type=text]{width:100%}
+  /* 部件面板 */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .parts{display:flex;flex-wrap:wrap;gap:5px;max-height:250px;overflow-y:auto}
+  .part{width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+        background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+        cursor:pointer;font-size:21px;line-height:1;overflow:hidden}
+  .part:hover{border-color:var(--accent);background:var(--panel)}
+  /* 结果 */
+  .res{display:flex;gap:12px;padding:9px 4px;border-bottom:1px solid var(--line);
+       align-items:baseline}
+  .res:last-child{border-bottom:none}
+  .res .w{font-size:21px;font-weight:600;min-width:5.5em;letter-spacing:1px}
+  .res .w .mk{color:var(--hit)}
+  .res .py{color:var(--accent);min-width:8em;font-family:ui-monospace,Consolas,monospace}
+  .res .meta{color:var(--dim);font-size:12px;min-width:6em}
+  .res .def{color:var(--dim);font-size:13px;flex:1;overflow:hidden;
+     text-overflow:ellipsis;white-space:nowrap}
+  .tag{display:inline-block;padding:0 5px;border-radius:4px;font-size:11px;
+       background:var(--panel2);border:1px solid var(--line);margin-left:4px;color:var(--dim)}
+  .tag.inf{color:var(--warn);border-color:var(--warn)}
+  .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
+  kbd{background:var(--panel2);border:1px solid var(--line);border-radius:4px;
+      padding:0 5px;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+</style>
+</head>
+<body>
+<header>
+  <h1>cn_nutri <small>按逐字属性反查汉语词语 · 韵母 / 声调 / 笔画 / 结构 / 部件</small></h1>
+</header>
+
+<main>
+  <section>
+    <h2>查询表达式</h2>
+    <textarea id="dsl" spellcheck="false"
+      placeholder="[a,an,ang][~3,~4][7-][独体,左右]"></textarea>
+    <div id="parse-notice" class="notice"></div>
+    <div class="notice dim" style="margin-top:8px">
+      一个字位写成一个 <code>[]</code>，组内 <b>同类取并集、异类取交集</b>。
+      可用 <code>?</code>（任意一字）与 <code>*</code>（任意序列），
+      也可直接写汉字。例：<code>张[a,an]</code>、<code>*[氵][~4]</code>。
+      符号不分全半角，空格与无法识别的条件会被忽略。
+    </div>
+  </section>
+
+  <section>
+    <h2>逐字约束 <span style="text-transform:none;font-weight:400">
+      （与上方表达式双向同步）</span></h2>
+    <div id="slots"></div>
+    <div class="row" style="margin-top:10px">
+      <button id="add-slot">+ 加一个字位</button>
+      <button id="clear-slots">清空</button>
+      <span class="notice dim" id="form-note"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>难输入部件 <span style="text-transform:none;font-weight:400">
+      （点选插入光标处，无需键盘输入）</span></h2>
+    <div class="tabs" id="part-tabs"></div>
+    <div class="parts" id="parts"></div>
+  </section>
+
+  <section>
+    <h2>结果 <span style="text-transform:none;font-weight:400" id="res-summary"></span></h2>
+    <div class="row" style="margin-bottom:8px">
+      <label class="notice dim">排序
+        <select id="sort">
+          <option value="freq">词频</option>
+          <option value="len">词长</option>
+          <option value="strokes">笔画</option>
+          <option value="pinyin">拼音</option>
+        </select>
+      </label>
+      <label class="notice dim"><input type="checkbox" id="idiom"> 只要成语</label>
+    </div>
+    <div id="results"></div>
+    <div class="pager" id="pager"></div>
+  </section>
+</main>
+
+<!-- 客户端引擎：解析 DSL、扫描 36.8 万词、排序全在浏览器里跑，服务器只发静态
+     文件。词库见 data/（由 tools/build_client_data.py 生成），说明见 README
+     「客户端引擎」一节。 -->
+<script src="engine.js"></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+
+const TONES = [1,2,3,4,5];
+
+// 词汇表不写死在这里：结构名与六书名由 tables.json 下发（服务端也是同一份）。
+// 之前这里手抄了一份，漏了「转注」「假借」，表单里就选不出来。
+let STRUCTURES = [];
+let LIUSHU = [];
+
+//: 客户端引擎。为 null 表示词库没加载成功，退回服务端 /api/* 那条路。
+let ENG = null;
+let USE_API = false;
+
+let slots = [emptySlot()];
+let formLocked = false;     // DSL 表达不了时锁住表单
+let page = 0;
+const PAGE = 20;
+
+function emptySlot(){
+  return {literals:[],finals:[],initials:[],tones:[],strokes:[],
+          structures:[],liushu:[],parts:[],ids:[]};
+}
+function isAny(s){
+  return !(s.literals.length||s.finals.length||s.initials.length||s.tones.length||
+           s.strokes.length||s.structures.length||s.liushu.length||s.parts.length||s.ids.length);
+}
+
+/* ---------- 槽位 <-> DSL ---------- */
+function strokesToDsl(list){
+  return list.map(x => x.op==="le" ? x.n+"-" : x.op==="ge" ? x.n+"+" : String(x.n));
+}
+function slotToDsl(s){
+  const items = [];
+  items.push(...s.tones.map(t => "~"+t));
+  items.push(...strokesToDsl(s.strokes));
+  items.push(...s.structures);
+  items.push(...s.liushu);
+  items.push(...s.finals);
+  items.push(...s.initials);
+  items.push(...s.parts);
+  items.push(...s.ids);
+  if(s.literals.length) items.push("("+s.literals.join("")+")");
+  return "["+items.join(",")+"]";
+}
+function parseStrokes(text){
+  const out = [];
+  for(const raw of text.split(/[,，、\s]+/)){
+    const t = raw.trim();
+    if(!t) continue;
+    let m;
+    if((m = /^(\d+)-$/.exec(t)))      out.push({op:"le", n:+m[1]});
+    else if((m = /^(\d+)\+$/.exec(t))) out.push({op:"ge", n:+m[1]});
+    else if(/^\d+$/.test(t))           out.push({op:"eq", n:+t});
+  }
+  return out;
+}
+function dslToSlots(elements){
+  const out = [];
+  for(const el of elements){
+    if(el.kind === "literal"){
+      const s = emptySlot(); s.literals = [el.ch]; out.push(s);
+    } else if(el.kind === "slot"){
+      const c = el.c, s = emptySlot();
+      s.literals   = c.literals.slice();
+      s.finals     = c.finals.slice();
+      s.initials   = c.initials.slice();
+      s.tones      = c.tones.slice();
+      s.strokes    = c.strokes.map(x => ({op:x.op, n:x.n}));
+      s.structures = c.structures.slice();
+      s.liushu     = c.liushu.slice();
+      s.parts      = c.parts.slice();
+      s.ids        = c.ids.slice();
+      out.push(s);
+    } else {
+      return null;              // ? 或 * —— 表单表示不了
+    }
+  }
+  return out;
+}
+
+/* ---------- 渲染逐字表单 ---------- */
+function toggle(arr, v){ const i = arr.indexOf(v); i<0 ? arr.push(v) : arr.splice(i,1); }
+
+function renderSlots(){
+  const box = $("#slots");
+  box.innerHTML = "";
+  slots.forEach((s, i) => {
+    const el = document.createElement("div");
+    el.className = "slot" + (isAny(s) ? " any" : "");
+    el.innerHTML = `
+      <h3><span>第 ${i+1} 字${isAny(s) ? " · 任意" : ""}</span>
+          <button title="删除该字位" data-del="${i}">✕</button></h3>
+      <div class="fld"><label>字面</label>
+        <input type="text" data-k="literals" data-i="${i}" maxlength="1"
+               value="${s.literals.join("")}" placeholder="如 张"></div>
+      <div class="fld"><label>韵母（逗号分隔，ü 写作 v）</label>
+        <input type="text" data-k="finals" data-i="${i}"
+               value="${s.finals.join(",")}" placeholder="a,an,ang"></div>
+      <div class="fld"><label>声母（xx = 零声母）</label>
+        <input type="text" data-k="initials" data-i="${i}"
+               value="${s.initials.join(",")}" placeholder="b,m,xx"></div>
+      <div class="fld"><label>声调</label><div class="chips" data-k="tones" data-i="${i}">
+        ${TONES.map(t=>`<button data-v="${t}" class="${s.tones.includes(t)?"on":""}">${t===5?"轻":t}</button>`).join("")}
+      </div></div>
+      <div class="fld"><label>笔画（如 8 / 7- / 16+）</label>
+        <input type="text" data-k="strokes" data-i="${i}"
+               value="${strokesToDsl(s.strokes).join(",")}" placeholder="7-"></div>
+      <div class="fld"><label>结构</label><div class="chips" data-k="structures" data-i="${i}">
+        ${STRUCTURES.map(v=>`<button data-v="${v}" class="${s.structures.includes(v)?"on":""}">${v}</button>`).join("")}
+      </div></div>
+      <div class="fld"><label>六书</label><div class="chips" data-k="liushu" data-i="${i}">
+        ${LIUSHU.map(v=>`<button data-v="${v}" class="${s.liushu.includes(v)?"on":""}">${v}</button>`).join("")}
+      </div></div>
+      <div class="fld"><label>部首 / 部件（如 氵 日）</label>
+        <input type="text" data-k="parts" data-i="${i}"
+               value="${s.parts.join("")}" placeholder="氵"></div>`;
+    box.appendChild(el);
+  });
+  box.querySelectorAll("button[data-del]").forEach(b => b.onclick = () => {
+    slots.splice(+b.dataset.del, 1);
+    if(!slots.length) slots.push(emptySlot());
+    syncFromForm();
+  });
+  box.querySelectorAll("input[data-k]").forEach(inp => inp.oninput = () => {
+    const s = slots[+inp.dataset.i], k = inp.dataset.k;
+    if(k === "literals")      s.literals = [...inp.value].slice(0,1);
+    else if(k === "strokes")  s.strokes  = parseStrokes(inp.value);
+    else if(k === "parts")    s.parts    = [...inp.value].filter(c => c.trim());
+    else                      s[k]       = inp.value.split(/[,，、\s]+/).filter(Boolean);
+    syncFromForm();
+  });
+  box.querySelectorAll(".chips").forEach(g => g.querySelectorAll("button").forEach(b => {
+    b.onclick = () => {
+      const s = slots[+g.dataset.i], k = g.dataset.k;
+      toggle(s[k], k === "tones" ? +b.dataset.v : b.dataset.v);
+      syncFromForm();
+    };
+  }));
+  document.querySelectorAll("#slots input").forEach(i => i.disabled = formLocked);
+  document.querySelectorAll("#slots .chips button").forEach(b => b.disabled = formLocked);
+  document.querySelectorAll("#slots button[data-del]").forEach(b => b.disabled = formLocked);
+}
+
+/* ---------- 数据通路 ----------
+   两条路返回**同形**的结果，所以下面渲染代码不用关心跑在哪边：
+   - 客户端引擎（常态）：本地就绪，同步返回，包一层 Promise 只是为了统一接口
+   - 服务端 API（词库没构建出来、或引擎加载失败时的退路） */
+function parseQuery(q){
+  if(ENG) return Promise.resolve(ENG.parse(q));
+  return fetch("/api/parse?q=" + encodeURIComponent(q)).then(r => r.json());
+}
+function searchQuery(q, opts){
+  if(ENG) return Promise.resolve(ENG.search(q, opts));
+  const p = new URLSearchParams({
+    q, limit: opts.limit, offset: opts.offset, sort: opts.sort,
+    idiom: opts.idiomOnly ? "1" : "0",
+  });
+  return fetch("/api/search?" + p).then(r => r.json());
+}
+
+/* ---------- 双向同步 ---------- */
+let syncing = false;
+function syncFromForm(){
+  if(syncing) return;
+  syncing = true;
+  $("#dsl").value = slots.map(slotToDsl).join("");
+  syncing = false;
+  renderSlots();
+  page = 0;
+  runSearch();
+}
+function syncFromDsl(){
+  if(syncing) return;
+  syncing = true;
+  const q = $("#dsl").value;
+  parseQuery(q)
+    .then(d => {
+      showParseNotice(d);
+      const next = d.errors.length ? null : dslToSlots(d.elements);
+      if(next){
+        formLocked = false;
+        slots = next.length ? next : [emptySlot()];
+        $("#form-note").textContent = "";
+      } else {
+        formLocked = true;
+        $("#form-note").textContent =
+          d.errors.length ? "表达式有语法错误，表单已暂停同步。"
+                          : "该表达式含 ? 或 *，逐字表单无法表示；表单已暂停同步。";
+      }
+      syncing = false;
+      renderSlots();
+    })
+    .catch(() => { syncing = false; });
+  page = 0;
+  runSearch();
+}
+function showParseNotice(d){
+  const box = $("#parse-notice");
+  box.innerHTML = "";
+  box.className = "notice";
+  if(d.errors.length){
+    box.className = "notice err";
+    const e = d.errors[0];
+    box.innerHTML = `<div>语法错误（偏移 ${e.offset}）：${e.reason}</div>
+      <div class="caret">${" ".repeat(Math.max(0,e.offset))}^</div>`;
+  } else if(d.ignored.length){
+    box.className = "notice warn";
+    box.innerHTML = "以下条件无法识别，已忽略：" +
+      d.ignored.map(i => `<code>${esc(i.text)}</code>`).join("、");
+  } else if($("#dsl").value.trim()){
+    box.className = "notice dim";
+    box.innerHTML = d.fixed_length !== null
+      ? `匹配 ${d.fixed_length} 字词。`
+      : `含 <code>*</code>，匹配任意长度。`;
+  }
+}
+
+/* ---------- 搜索 ---------- */
+let searchSeq = 0;
+function runSearch(){
+  const q = $("#dsl").value.trim();
+  const seq = ++searchSeq;
+  const opts = {
+    limit: PAGE, offset: page*PAGE,
+    sort: $("#sort").value, idiomOnly: $("#idiom").checked,
+  };
+  // 客户端引擎是**同步**的：含 * 的查询要扫 36.8 万词，直接跑会把界面卡住
+  // 一整秒。所以先让浏览器把「查询中」画出来，下一帧再算。
+  const job = () => {
+    if(seq !== searchSeq) return;              // 期间又改了条件，这次作废
+    searchQuery(q, opts)
+      .then(d => { if(seq === searchSeq) renderResults(d); })
+      .catch(e => {
+        if(seq === searchSeq) $("#results").textContent = "查询失败：" + e;
+      });
+  };
+  if(ENG && $("#results").children.length){
+    $("#res-summary").textContent = "查询中…";
+    setTimeout(job, 0);
+  } else job();
+}
+
+function renderResults(d){
+  const out = $("#results");
+  const sum = $("#res-summary");
+  if(d.error){
+    out.innerHTML = `<div class="notice err">${esc(d.error)}</div>`;
+    sum.textContent = ""; $("#pager").innerHTML = "";
+    return;
+  }
+  let s = `命中 ${d.total.toLocaleString()} 条`;
+  if(d.total) s += `　·　第 ${d.offset+1}–${d.offset+d.results.length} 条`;
+  s += `　·　${d.elapsed_ms} ms${ENG ? "（本机）" : ""}`;
+  if(d.truncated) s += `　·　仅排序前 ${d.max_results} 条`;
+  sum.textContent = s;
+
+  if(d.excluded_missing){
+    out.innerHTML = `<div class="notice dim">另有 ${d.excluded_missing} 个词因
+      笔画/结构数据缺失无法判定而被排除，结果可能不完整（缺：${esc(d.missing_chars)}）</div>`;
+  } else out.innerHTML = "";
+
+  if(!d.results.length){
+    out.innerHTML += `<div class="notice dim">没有命中。试试放宽条件。</div>`;
+  }
+  for(const r of d.results){
+    const div = document.createElement("div");
+    div.className = "res";
+    const chars = [...r.word].map((c,i) =>
+      r.spans.includes(i) ? `<span class="mk">${esc(c)}</span>` : esc(c)).join("");
+    const py = r.pinyin.length
+      ? r.pinyin[r.read_index] ?? r.pinyin[0] : "（无读音）";
+    const inf = r.read_sources[r.read_index] === "inferred"
+      ? `<span class="tag inf">读音推定</span>` : "";
+    const tags = [];
+    if(r.is_idiom) tags.push("成语");
+    const structs = r.chars.map(c => c.structure || "?").join("/");
+    if(r.chars.some(c => c.structure)) tags.push(structs);
+    if(r.freq) tags.push("频" + r.freq);
+    else tags.push("未收词频");
+    div.innerHTML =
+      `<div class="w">${chars}</div>
+       <div class="py">${esc(py)}</div>
+       <div class="meta">${tags.map(esc).join(" · ")}</div>
+       <div class="def">${esc(r.definition || "")}${inf}</div>`;
+    out.appendChild(div);
+  }
+
+  const pages = Math.max(1, Math.ceil(Math.min(d.total, d.max_results) / PAGE));
+  $("#pager").innerHTML = "";
+  if(pages > 1){
+    $("#pager").innerHTML =
+      `<button ${page===0?"disabled":""} id="prev">‹ 上一页</button>
+       <span class="notice dim">第 ${page+1} / ${pages} 页</span>
+       <button ${page>=pages-1?"disabled":""} id="next">下一页 ›</button>`;
+    if($("#prev")) $("#prev").onclick = () => { page--; runSearch(); };
+    if($("#next")) $("#next").onclick = () => { page++; runSearch(); };
+  }
+}
+
+function esc(s){
+  return String(s).replace(/[&<>"]/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+/* ---------- 部件面板 ---------- */
+function renderParts(data, tabIndex){
+  const tabs = $("#part-tabs"), box = $("#parts");
+  tabs.innerHTML = "";
+  data.groups.forEach((g, i) => {
+    const b = document.createElement("button");
+    b.textContent = `${g.label}（${g.chars.length}）`;
+    if(i === tabIndex) b.className = "on";
+    b.onclick = () => renderParts(data, i);
+    tabs.appendChild(b);
+  });
+  const g = data.groups[tabIndex];
+  box.innerHTML = "";
+  if(!g) return;
+  for(const ch of g.chars){
+    const el = document.createElement("div");
+    el.className = "part";
+    el.title = "点击插入 " + ch;
+    // 生僻字形由内置的 cn-nutri-parts 字体提供，缺字体时退回系统字体（可能显示豆腐块）
+    el.textContent = ch;
+    el.onclick = () => insertPart(ch);
+    box.appendChild(el);
+  }
+}
+function insertPart(part){
+  const ta = $("#dsl");
+  const pos = ta.selectionStart ?? ta.value.length;
+  const before = ta.value.slice(0, pos), after = ta.value.slice(pos);
+  const open = before.lastIndexOf("["), close = before.lastIndexOf("]");
+  const closeAhead = after.indexOf("]");
+  let text, caret;
+  if(open > close && closeAhead >= 0){          // 已在某个 [] 内
+    const sep = /[,\[]\s*$/.test(before) ? "" : ",";
+    text  = before + sep + part + after;
+    caret = pos + sep.length + part.length;
+  } else {                                       // 新开一个字位
+    text  = before + "[" + part + "]" + after;
+    caret = pos + part.length + 2;
+  }
+  ta.value = text;
+  ta.focus();
+  ta.setSelectionRange(caret, caret);
+  syncFromDsl();
+}
+
+/* ---------- 启动 ---------- */
+async function boot(){
+  const note = $("#form-note");
+  note.textContent = "正在加载词库…";
+
+  try{
+    // 相对路径（"."）而不是绝对路径：这样放在子目录下（比如 GitHub Pages 的
+    // /cn-nutri/）也能取到，写成 "/data/..." 就只有根目录能用了。
+    ENG = await CnNutri.load(".");
+    STRUCTURES = ENG.T.query.structures;
+    LIUSHU = ENG.T.query.liushu;
+    const c = ENG.T.corpus;
+    note.textContent = "";
+    console.log("cn_nutri 客户端引擎 v" + CnNutri.VERSION,
+                c.n_words, "词 /", c.n_chars, "字 /",
+                (ENG.T.search.max_results), "条上限", ENG.T.meta);
+  }catch(err){
+    // 词库没烘出来（或引擎脚本没发过去）时退回服务端。/api/* 那条路一直是好的，
+    // 没理由因为少了静态词库就让整页瘫痪。
+    console.warn("客户端引擎加载失败，退回服务端 API：", err);
+    USE_API = true;
+    try{
+      const meta = await (await fetch("/api/meta")).json();
+      STRUCTURES = meta.structures || [];
+      LIUSHU = meta.liushu || [];
+      note.textContent = "词库未能本地加载，已退回服务端查询（首次部署需先跑 " +
+                         "tools/build_client_data.py）。";
+    }catch(e){
+      note.textContent = "词库加载失败：" + err;
+    }
+  }
+  renderSlots();
+  syncFromDsl();          // 顺带把默认表达式填进表单并跑第一次查询
+}
+
+function init(){
+  renderSlots();
+  $("#add-slot").onclick = () => { slots.push(emptySlot()); syncFromForm(); };
+  $("#clear-slots").onclick = () => { slots = [emptySlot()]; syncFromForm(); };
+  $("#sort").onchange = () => { page = 0; runSearch(); };
+  $("#idiom").onchange = () => { page = 0; runSearch(); };
+
+  let timer = null;
+  $("#dsl").addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(syncFromDsl, 260);
+  });
+  $("#dsl").addEventListener("keydown", e => {
+    if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); syncFromDsl(); }
+  });
+
+  // 部件面板对两条路都一样：优先读烘好的静态文件，读不到才问后端
+  fetch("data/components.json").then(r => r.ok ? r.json() : Promise.reject())
+    .catch(() => fetch("/api/components").then(r => r.json()))
+    .then(d => { if(d.groups && d.groups.length) renderParts(d, 0); })
+    .catch(() => {});
+
+  boot();
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>
