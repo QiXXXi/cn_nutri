@@ -462,7 +462,7 @@ function renderParts(data, tabIndex){
   tabs.innerHTML = "";
   data.groups.forEach((g, i) => {
     const b = document.createElement("button");
-    b.textContent = `${g.label}（${g.chars.length}）`;
+    b.textContent = g.label;
     if(i === tabIndex) b.className = "on";
     b.onclick = () => renderParts(data, i);
     tabs.appendChild(b);
