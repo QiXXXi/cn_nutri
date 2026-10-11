@@ -389,11 +389,26 @@ let syncing = false;
 function syncFromForm(rebuild){
   if(syncing) return;
   syncing = true;
-  $("#dsl").value = slots.map(slotToDsl).join("");
+  const text = slots.map(slotToDsl).join("");
+  $("#dsl").value = text;
   syncing = false;
+
+  // 表单产出的表达式就是**表单自己的序列化**，按构造不可能含 ? 或 *，所以
+  // 「暂停同步」在这里必然失效，必须解除。不解除的话：表达式含 * 时表单被禁用，
+  // 此时点「清空」或「+ 加一个字位」，表达式已经变回普通式子，表单却一直灰着——
+  // 而且没有入口能把它唤醒，因为表单的输入框自己就是禁用的。
+  const wasLocked = formLocked;
+  formLocked = false;
+  $("#form-note").textContent = "";
+
   // 只有**增删字位**才重建：表单自己就是状态的来源，DOM 已经是对的。
   // 输入时重建等于每敲一个字就把输入框拆了重装，焦点与组字状态全丢。
   if(rebuild) renderSlots();
+
+  // 提示区也得跟着表达式走，不然会留着上一条「含 *」的旧话。只在刚解除暂停时
+  // 补这一次：每次敲键都补的话，退回服务端（ENG 为 null）那条路会一个字一个请求。
+  if(wasLocked) parseQuery(text).then(showParseNotice).catch(() => {});
+
   page = 0;
   runSearch();
 }

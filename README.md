@@ -27,7 +27,7 @@ $ cn-nutri "[a,an,ang][~3,~4][7-][独体,左右]" --limit 4 --no-color
 pip install -e .                    # 提供 cn-nutri 命令
 python -I tools/build_db.py         # data_raw/ -> data/cn_nutri.db（约 8 秒）
 python -I tools/build_client_data.py  # 网页用的客户端词库（约 10 秒）
-python -m pytest tests/             # 503 个测试（其中 76 个要 node，见「客户端引擎」）
+python -m pytest tests/             # 517 个测试（其中 90 个要 node，见「客户端引擎」）
 ```
 
 `data/cn_nutri.db` 是构建产物（约 59 MB），已随仓库提供。想从原始数据重头构建，
@@ -110,6 +110,13 @@ node tools/bench_client.js          # 词库 12.87 MB 解码一次 8 ms，不计
 读音来源、拼音串、释义，以及 `excluded_missing` / `missing_chars` / `scanned` 这些
 统计量。少比一个字段，那个字段就会静静地漂。跑它要 node；没装 node 时整模块 skip，
 **skip 不是通过**。
+
+界面里的状态机（表达式 ⇄ 逐字表单的双向同步、含 `?`/`*` 或语法错时暂停同步、
+点「清空」「+ 加一个字位」后恢复）由
+[tests/test_web_form.py](tests/test_web_form.py) 盯着。它不是抄一份逻辑出来测，
+而是让 [tools/form_cli.js](tools/form_cli.js) 把 `index.html` 里那段内联脚本
+**真的跑到 node 里**（垫一层最小 DOM），再按用户的操作顺序驱动它。抄一份等于测
+抄件：页面改了、抄件没改，套子照样绿。
 
 `web/data/` 里的三个文件是构建产物，随仓库提供；只有从原始数据重建才需要 `data_raw/`。
 
