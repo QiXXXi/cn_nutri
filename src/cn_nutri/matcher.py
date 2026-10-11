@@ -80,19 +80,65 @@ class MatchStats:
 # 预编译：把一个字的约束压成扁平元组，扫描时不再碰 dataclass 属性
 # --------------------------------------------------------------------------
 
+#: ``_prepare`` 末尾两项是相等/不等标记。散落着用 ``payload[10]`` 太脆，起个名。
+_P_EQ, _P_NEQ = 10, 11
+
+
 def _prepare(c: CharConstraint) -> tuple:
     """``stroke_set()`` 会展开成 0..64 的集合，原本按字重算，是扫描里最贵的一步。"""
     return (
         c.is_empty(), c.literals, c.initials, c.finals, c.tones,
         c.stroke_set(), c.structures, c.liushu, c.parts, c.ids,
+        c.eq, c.neq,
     )
+
+
+def _apply_marks(
+    payload: tuple, word: str, wi: int, bind: tuple, oblig: tuple
+) -> tuple[bool, tuple, tuple]:
+    """把一个 ``[]`` 的相等/不等标记并入游标状态。
+
+    词是**给定的**，所以这里比的全是已经确定的字，不需要搜索。唯一麻烦的是
+    ``≠A`` 可能写在 ``=A`` 之前——那会儿还不知道 A 绑到哪个字位，于是先把
+    ``(A, 字位)`` 记成一条**悬空义务**，等后面某个字位绑上 A 时回头兑现。
+
+    ``bind`` / ``oblig`` 都是不可变元组（可哈希，能直接进 ``_glob`` 的 memo key），
+    回溯时天然不用撤销。没有标记的模式下两者恒为空元组，热路径零额外开销。
+
+    返回 ``(是否满足, 新 bind, 新 oblig)``。
+    """
+    eq_labels, neq_labels = payload[_P_EQ], payload[_P_NEQ]
+    if not (eq_labels or neq_labels):
+        return True, bind, oblig
+
+    ch = word[wi]
+    merged = dict(bind)
+    for label in eq_labels:
+        prev = merged.get(label)
+        if prev is not None and prev != ch:
+            return False, bind, oblig
+        merged[label] = ch
+
+    # 刚刚绑上的标签，可能正欠着前面某个 ≠ 的义务
+    for label, oi in oblig:
+        if label in merged and word[oi] == merged[label]:
+            return False, bind, oblig
+
+    for label in neq_labels:
+        if label in merged:
+            if ch == merged[label]:
+                return False, bind, oblig
+        else:
+            oblig = oblig + ((label, wi),)
+
+    return True, tuple(sorted(merged.items())), tuple(sorted(oblig))
 
 
 def match_prepared(p: tuple, ch: str, syl: Syllable | None,
                    info: CharInfo | None) -> bool | None:
     """``match_char`` 的预编译版。True/False 为判定，None 表示数据缺失。"""
     (empty, literals, initials, finals, tones,
-     strokes, structures, liushu, parts, ids) = p
+     strokes, structures, liushu, parts, ids, _eq, _neq) = p
     if empty:
         return True
     if literals and ch not in literals:
@@ -181,9 +227,15 @@ class Matcher:
         """定长直路：无 ``*`` 时不需要回溯。"""
         chars = self.chars
         spans = []
+        bind: tuple = ()
+        oblig: tuple = ()
         for i, (kind, payload) in enumerate(els):
             ch = word[i]
             if kind == "slot":
+                # 标记先判：它冲突是**确定**的不匹配，不该被记成「数据缺失」
+                ok, bind, oblig = _apply_marks(payload, word, i, bind, oblig)
+                if not ok:
+                    return None
                 syl = reading[i] if reading is not None else None
                 verdict = match_prepared(payload, ch, syl, chars.get(ch))
                 if verdict is None:
@@ -202,10 +254,11 @@ class Matcher:
         n = len(els)
         m = len(word)
         chars = self.chars
-        memo: dict[tuple[int, int], list[int] | None] = {}
+        # 无标记时 bind/oblig 恒为 ()，键退化回 (ei, wi)，与从前等价
+        memo: dict[tuple, list[int] | None] = {}
 
-        def rec(ei: int, wi: int) -> list[int] | None:
-            key = (ei, wi)
+        def rec(ei: int, wi: int, bind: tuple, oblig: tuple) -> list[int] | None:
+            key = (ei, wi, bind, oblig)
             if key in memo:
                 return memo[key]
             if ei == n:
@@ -218,36 +271,38 @@ class Matcher:
 
             if kind == "star":
                 for k in range(wi, m + 1):
-                    tail = rec(ei + 1, k)
+                    tail = rec(ei + 1, k, bind, oblig)
                     if tail is not None:
                         out = tail
                         break
             elif wi >= m:
                 out = None
             elif kind == "any":
-                tail = rec(ei + 1, wi + 1)
+                tail = rec(ei + 1, wi + 1, bind, oblig)
                 if tail is not None:
                     out = [wi] + tail
             elif kind == "lit":
                 if word[wi] == payload:
-                    tail = rec(ei + 1, wi + 1)
+                    tail = rec(ei + 1, wi + 1, bind, oblig)
                     if tail is not None:
                         out = [wi] + tail
             else:
                 ch = word[wi]
-                syl = reading[wi] if reading is not None else None
-                verdict = match_prepared(payload, ch, syl, chars.get(ch))
-                if verdict is None:
-                    unknown.add(ch)
-                elif verdict:
-                    tail = rec(ei + 1, wi + 1)
-                    if tail is not None:
-                        out = [wi] + tail
+                ok, nbind, noblig = _apply_marks(payload, word, wi, bind, oblig)
+                if ok:
+                    syl = reading[wi] if reading is not None else None
+                    verdict = match_prepared(payload, ch, syl, chars.get(ch))
+                    if verdict is None:
+                        unknown.add(ch)
+                    elif verdict:
+                        tail = rec(ei + 1, wi + 1, nbind, noblig)
+                        if tail is not None:
+                            out = [wi] + tail
 
             memo[key] = out
             return out
 
-        return rec(0, 0)
+        return rec(0, 0, (), ())
 
     # ---- 对外 -----------------------------------------------------------
     def match_compiled(self, compiled: Compiled, w: Word,

@@ -216,3 +216,86 @@ def test_roundtrip_through_dsl():
 def test_structure_alias_dsl_is_short_form():
     """DSL 里结构用「独体」而不是汉典的「单一结构」。"""
     assert one("[独体]").to_dsl() == "[独体]"
+
+
+# ------------------------------------------------------------- 相等/不等标记
+
+def test_eq_neq_token_classification():
+    c = one("[=a,≠B]")
+    assert c.eq == {"A"} and c.neq == {"B"}
+    assert not c.is_empty()
+
+
+def test_labels_are_uppercased():
+    assert one("[=a]").eq == one("[=A]").eq == {"A"}
+
+
+def test_bang_eq_is_an_alias_for_neq():
+    """`!=A` 是给键盘的退路：≠ 在多数输入法里不好打。"""
+    p = parse_pattern("[!=A][=A]")
+    assert p.errors == []
+    assert p.elements[0].constraint.neq == {"A"}
+    assert p.to_dsl() == "[≠A][=A]"
+
+
+def test_fullwidth_marks_normalize():
+    p = parse_pattern("[＝Ａ][！＝Ａ]")
+    assert p.normalized == "[=A][!=A]"
+    assert p.errors == []
+    assert p.to_dsl() == "[=A][≠A]"
+
+
+@pytest.mark.parametrize("src", ["[=AB]", "[=1]", "[=]", "[=汉]"])
+def test_bad_label_is_unrecognized_not_an_error(src):
+    """标签必须是单个 ASCII 字母；否则退回通用的「无法识别」路径。"""
+    p = parse_pattern(src)
+    assert p.ignored and p.ignored[0].reason == "无法识别"
+    assert p.errors == []
+
+
+def test_neq_before_eq_is_legal():
+    """悬空义务：≠A 允许写在 =A 之前，由 matcher 兜住。"""
+    p = parse_pattern("[≠A][=A]")
+    assert p.errors == []
+
+
+def test_neq_without_any_eq_is_an_error():
+    p = parse_pattern("[≠A][~1]")
+    assert len(p.errors) == 1
+    assert p.errors[0].reason == "≠A 没有对应的 =A"
+    assert p.errors[0].offset == 0
+
+
+def test_eq_and_neq_on_the_same_slot_is_an_error():
+    p = parse_pattern("[=A,≠A]")
+    assert len(p.errors) == 1
+    assert p.errors[0].reason == "=A 与 ≠A 不能写在同一字位"
+
+
+def test_same_slot_eq_neq_is_allowed_when_other_slots_define_it():
+    """`[=A,≠A]` 单看自相矛盾，但整个表达式里 A 由别处定义——仍然非法。
+
+    非法性只看**同一个字位**，跟别处有没有定义无关：那个字位永远无法满足。
+    """
+    p = parse_pattern("[=A][=A,≠A]")
+    assert len(p.errors) == 1
+    assert p.errors[0].offset == 4
+
+
+def test_marks_may_coexist_with_other_conditions():
+    c = one("[=A,~3]")
+    assert c.eq == {"A"} and c.tones == {3}
+
+
+def test_mark_dsl_roundtrip():
+    """往返稳定：正则在第一次序列化后收敛，之后再解析不再变。"""
+    for src in ("[=A][=A]", "[=A][][=A][≠A]", "[≠A][=A]", "[=A,~3,≠B][=B]",
+                "[=A][=B][=A][=B]"):
+        once = parse_pattern(src).to_dsl()
+        assert parse_pattern(once).to_dsl() == once, src
+        assert parse_pattern(once).errors == []
+
+
+def test_marks_sort_before_other_conditions_in_dsl():
+    """to_dsl 的项序就是文本框的内容，标记必须固定排在最前，不然会自己跳。"""
+    assert one("[~3,=B,≠A,a,7]").to_dsl() == "[=B,≠A,~3,7,a]"

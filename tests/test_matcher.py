@@ -219,3 +219,103 @@ def test_match_returns_none_when_too_short():
     m = matcher()
     w = word("张", [("zh", "ang", 1)])
     assert m.match(parse_pattern("[~1][~1]"), w) is None
+
+
+# --------------------------------------------------------- 相等/不等标记
+#
+# 词是给定的，所以标记比的全是**已经确定的字**，退化成已知字之间的比较，
+# 不需要搜索。唯一要小心的是 ≠A 可能写在 =A 之前（悬空义务）。
+
+def hit(m, text, syllables, query):
+    return m.match(parse_pattern(query), word(text, syllables)) is not None
+
+
+def s(*tones):
+    """只关心声调时的偷懒读音：声母韵母随便填，反正标记不看它们。"""
+    return [("", "a", t) for t in tones]
+
+
+def test_eq_marks_force_the_same_character():
+    """[=A][=A]：两个字必须是同一个字。"""
+    m = matcher()
+    assert hit(m, "沐沐", s(1, 1), "[=A][=A]")
+    assert not hit(m, "沐江", s(1, 1), "[=A][=A]")
+
+
+def test_mark_slot_still_honours_its_own_constraints():
+    """[=A][=A,~3]：既要求同字，第 2 字还得是第三声。"""
+    m = matcher()
+    assert hit(m, "沐沐", s(1, 3), "[=A][=A,~3]")
+    assert not hit(m, "沐沐", s(1, 1), "[=A][=A,~3]")
+
+
+def test_unequal_marks_the_user_example():
+    """[=A][][=A][≠A]：第 1、3 字相同，第 4 字与它们不同。"""
+    m = matcher()
+    assert hit(m, "沐江沐白", s(1, 1, 1, 1), "[=A][][=A][≠A]")
+    assert not hit(m, "沐江沐沐", s(1, 1, 1, 1), "[=A][][=A][≠A]")
+    assert not hit(m, "沐江白沐", s(1, 1, 1, 1), "[=A][][=A][≠A]")
+
+
+def test_two_independent_label_groups():
+    """[=A][=B][=A][=B]：1=3、2=4；至于 1 与 2 相等与否不限。"""
+    m = matcher()
+    assert hit(m, "沐江沐江", s(1, 1, 1, 1), "[=A][=B][=A][=B]")
+    assert hit(m, "沐沐沐沐", s(1, 1, 1, 1), "[=A][=B][=A][=B]")
+    assert not hit(m, "沐江沐白", s(1, 1, 1, 1), "[=A][=B][=A][=B]")
+
+
+def test_lone_eq_label_constrains_nothing():
+    """只出现一次、又没有配对的 ≠A 时，=A 退化为无条件。"""
+    m = matcher()
+    assert hit(m, "张白", s(1, 1), "[~1][=A]")
+    assert hit(m, "沐江", s(1, 1), "[~1][=A]")
+
+
+def test_neq_before_eq_is_settled_when_the_label_binds():
+    """[≠A][=A] 合法：不等义务挂在前面，等 A 在后面绑上时回头兑现。"""
+    m = matcher()
+    assert hit(m, "张白", s(1, 1), "[≠A][=A]")
+    assert not hit(m, "明明", s(1, 1), "[≠A][=A]")
+
+
+def test_pending_obligation_with_an_intervening_slot():
+    """[≠A][~2][=A]：义务跨越中间那个字位才兑现。"""
+    m = matcher()
+    assert hit(m, "张白明", s(1, 2, 1), "[≠A][~2][=A]")     # 张 ≠ 明
+    assert not hit(m, "明明明", s(1, 2, 1), "[≠A][~2][=A]")  # 明 == 明
+
+
+def test_one_slot_may_carry_several_marks():
+    """[=A][≠B,≠C][=B][=C]：第 2 字既不等于 B 也不等于 C。"""
+    m = matcher()
+    assert hit(m, "张江白明", s(1, 1, 1, 1), "[=A][≠B,≠C][=B][=C]")
+    assert not hit(m, "张白白明", s(1, 1, 1, 1), "[=A][≠B,≠C][=B][=C]")
+
+
+def test_marks_compose_with_star():
+    """含 * 时游标态进 memo 键；这里钉住语义正确。"""
+    m = matcher()
+    assert hit(m, "张明明白", s(1, 1, 1, 1), "*[=A][=A]*")   # 含叠字 明明
+    assert not hit(m, "张白江沐", s(1, 1, 1, 1), "*[=A][=A]*")
+
+
+def test_pending_obligations_are_part_of_the_memo_key():
+    """★ 这条是 * 与标记同用时的关键：同一个 (ei, wi) 可能带着**不同的**
+    未兑现义务被走到（义务记的是字位，不是标签）。键里漏掉义务，两条路就会
+    互相借答案。
+    """
+    m = matcher()
+    # 首字与末字不同即命中；全同时不命中。
+    assert hit(m, "张明明", s(1, 1, 1), "*[≠A]*[=A]")
+    assert hit(m, "明明张", s(1, 1, 1), "*[≠A]*[=A]")
+    assert not hit(m, "明明明", s(1, 1, 1), "*[≠A]*[=A]")
+
+
+def test_mark_conflict_is_a_plain_miss_not_missing_data():
+    """标记冲突是**确定**的不匹配，不该被记进 excluded_missing（数据缺失）。"""
+    m = matcher()
+    w = word("沐江", s(1, 1))
+    assert m.match(parse_pattern("[=A][=A]"), w) is None
+    assert m.stats.excluded_missing == 0
+    assert m.stats.missing_chars == set()

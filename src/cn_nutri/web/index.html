@@ -107,6 +107,11 @@
       可用 <code>?</code>（任意一字）与 <code>*</code>（任意序列），
       也可直接写汉字。例：<code>张[a,an]</code>、<code>*[氵][~4]</code>。
       符号不分全半角，空格与无法识别的条件会被忽略。
+      <br>
+      <code>=A</code> 是同字标记：带 <code>=A</code> 的几个字位必须是同一个字；
+      <code>≠A</code>（也可写 <code>!=A</code>）表示与它不同。例
+      <code>[=A][][=A][≠A]</code> 是「第 1、3 字相同、第 4 字不同」。
+      唯一非法写法是 <code>≠A</code> 全式找不到配对的 <code>=A</code>。
     </div>
   </section>
 
@@ -171,11 +176,12 @@ let page = 0;
 const PAGE = 20;
 
 function emptySlot(){
-  return {literals:[],finals:[],initials:[],tones:[],strokes:[],
+  return {eq:[],neq:[],literals:[],finals:[],initials:[],tones:[],strokes:[],
           structures:[],liushu:[],parts:[],ids:[]};
 }
 function isAny(s){
-  return !(s.literals.length||s.finals.length||s.initials.length||s.tones.length||
+  return !(s.eq.length||s.neq.length||
+           s.literals.length||s.finals.length||s.initials.length||s.tones.length||
            s.strokes.length||s.structures.length||s.liushu.length||s.parts.length||s.ids.length);
 }
 
@@ -183,8 +189,31 @@ function isAny(s){
 function strokesToDsl(list){
   return list.map(x => x.op==="le" ? x.n+"-" : x.op==="ge" ? x.n+"+" : String(x.n));
 }
+/* 相等/不等标记：`=A` 同字、`≠A` 不同字，标签统一大写，接受 `!=A` 写法。
+   `≠` 在不少输入法里不好打，`!=` 是给键盘的退路。 */
+function marksToDsl(s){
+  return [...s.eq.map(L => "="+L), ...s.neq.map(L => "≠"+L)];
+}
+function parseMarks(text){
+  const eq = [], neq = [];
+  for(const raw of text.split(/[,，、\s]+/)){
+    const t = raw.trim();
+    if(!t) continue;
+    let m;
+    if((m = /^=(.*)$/.exec(t)))       eq.push(m[1]);
+    else if((m = /^≠(.*)$/.exec(t)))  neq.push(m[1]);
+    else if((m = /^!=(.*)$/.exec(t))) neq.push(m[1]);
+    // 没写前缀的裸标签不猜是相等还是不等，直接不收。
+  }
+  // 标签原样留着（单个字母才归一成大写），坏标签交给 DSL 解析器报「无法识别」——
+  // 与韵母/声母栏一个规矩：表单只管收字，校验以表达式那一侧为准。
+  const pick = arr => [...new Set(arr.map(
+      L => /^[A-Za-z]$/.test(L) ? L.toUpperCase() : L))].sort();
+  return {eq: pick(eq), neq: pick(neq)};
+}
 function slotToDsl(s){
   const items = [];
+  items.push(...marksToDsl(s));          // 与 Python to_dsl 同序：标记在最前
   items.push(...s.tones.map(t => "~"+t));
   items.push(...strokesToDsl(s.strokes));
   items.push(...s.structures);
@@ -215,6 +244,8 @@ function dslToSlots(elements){
       const s = emptySlot(); s.literals = [el.ch]; out.push(s);
     } else if(el.kind === "slot"){
       const c = el.c, s = emptySlot();
+      s.eq         = c.eq.slice();
+      s.neq        = c.neq.slice();
       s.literals   = c.literals.slice();
       s.finals     = c.finals.slice();
       s.initials   = c.initials.slice();
@@ -235,18 +266,53 @@ function dslToSlots(elements){
 /* ---------- 渲染逐字表单 ---------- */
 function toggle(arr, v){ const i = arr.indexOf(v); i<0 ? arr.push(v) : arr.splice(i,1); }
 
+/* 敲键时的**就地**更新。绝不重建 DOM：正在输入的那个 <input> 一被 innerHTML
+   换掉，焦点就没了；中文输入法更糟——组字状态跟着元素一起消失，候选窗直接关掉，
+   于是「字面」栏根本打不出字。只刷新这一块的标题与「任意」态。 */
+function refreshSlot(i){
+  const el = document.querySelector(`#slots .slot[data-slot="${i}"]`);
+  if(!el) return;
+  const s = slots[i], any = isAny(s);
+  el.classList.toggle("any", any);
+  el.querySelector(".slot-name").textContent = `第 ${i+1} 字${any ? " · 任意" : ""}`;
+}
+
+function applyInput(inp){
+  const i = +inp.dataset.i, s = slots[i];
+  if(!s) return;
+  const k = inp.dataset.k;
+  if(k === "literals"){
+    const cps = [...inp.value];         // 按码位切，别切坏增补平面的字
+    if(cps.length > 1) inp.value = cps[0];   // 粘多了就地截断，免得显示与状态分家
+    s.literals = cps.slice(0, 1);
+  }
+  else if(k === "marks"){
+    const m = parseMarks(inp.value);
+    s.eq = m.eq; s.neq = m.neq;
+  }
+  else if(k === "strokes")  s.strokes = parseStrokes(inp.value);
+  else if(k === "parts")    s.parts   = [...inp.value].filter(c => c.trim());
+  else                      s[k]      = inp.value.split(/[,，、\s]+/).filter(Boolean);
+  refreshSlot(i);
+  syncFromForm();
+}
+
 function renderSlots(){
   const box = $("#slots");
   box.innerHTML = "";
   slots.forEach((s, i) => {
     const el = document.createElement("div");
     el.className = "slot" + (isAny(s) ? " any" : "");
+    el.dataset.slot = i;                 // refreshSlot 靠它就地找到这一块
     el.innerHTML = `
-      <h3><span>第 ${i+1} 字${isAny(s) ? " · 任意" : ""}</span>
+      <h3><span class="slot-name">第 ${i+1} 字${isAny(s) ? " · 任意" : ""}</span>
           <button title="删除该字位" data-del="${i}">✕</button></h3>
       <div class="fld"><label>字面</label>
-        <input type="text" data-k="literals" data-i="${i}" maxlength="1"
+        <input type="text" data-k="literals" data-i="${i}"
                value="${s.literals.join("")}" placeholder="如 张"></div>
+      <div class="fld"><label>相等标记（=A 同字 / ≠A 不同字）</label>
+        <input type="text" data-k="marks" data-i="${i}"
+               value="${marksToDsl(s).join(",")}" placeholder="=A,≠B"></div>
       <div class="fld"><label>韵母（逗号分隔，ü 写作 v）</label>
         <input type="text" data-k="finals" data-i="${i}"
                value="${s.finals.join(",")}" placeholder="a,an,ang"></div>
@@ -273,20 +339,26 @@ function renderSlots(){
   box.querySelectorAll("button[data-del]").forEach(b => b.onclick = () => {
     slots.splice(+b.dataset.del, 1);
     if(!slots.length) slots.push(emptySlot());
-    syncFromForm();
+    syncFromForm(true);                 // 字位数变了，只有这条路要重建 DOM
   });
-  box.querySelectorAll("input[data-k]").forEach(inp => inp.oninput = () => {
-    const s = slots[+inp.dataset.i], k = inp.dataset.k;
-    if(k === "literals")      s.literals = [...inp.value].slice(0,1);
-    else if(k === "strokes")  s.strokes  = parseStrokes(inp.value);
-    else if(k === "parts")    s.parts    = [...inp.value].filter(c => c.trim());
-    else                      s[k]       = inp.value.split(/[,，、\s]+/).filter(Boolean);
-    syncFromForm();
+  box.querySelectorAll("input[data-k]").forEach(inp => {
+    // 输入法组字期间**不能**碰 DOM 也不能读 inp.value：那时 value 还是拼音字母，
+    // 而且改动元素会让候选窗直接消失。组字结束再统一处理一次。
+    inp.addEventListener("compositionstart", () => inp.dataset.composing = "1");
+    inp.addEventListener("compositionend", () => {
+      delete inp.dataset.composing;
+      applyInput(inp);
+    });
+    inp.oninput = () => { if(!inp.dataset.composing) applyInput(inp); };
   });
   box.querySelectorAll(".chips").forEach(g => g.querySelectorAll("button").forEach(b => {
     b.onclick = () => {
       const s = slots[+g.dataset.i], k = g.dataset.k;
       toggle(s[k], k === "tones" ? +b.dataset.v : b.dataset.v);
+      // 切片按钮自己翻 on 态：就地更新，别重建 DOM（重建就没法连点了）
+      const on = s[k].includes(k === "tones" ? +b.dataset.v : b.dataset.v);
+      b.classList.toggle("on", on);
+      refreshSlot(+g.dataset.i);
       syncFromForm();
     };
   }));
@@ -314,12 +386,14 @@ function searchQuery(q, opts){
 
 /* ---------- 双向同步 ---------- */
 let syncing = false;
-function syncFromForm(){
+function syncFromForm(rebuild){
   if(syncing) return;
   syncing = true;
   $("#dsl").value = slots.map(slotToDsl).join("");
   syncing = false;
-  renderSlots();
+  // 只有**增删字位**才重建：表单自己就是状态的来源，DOM 已经是对的。
+  // 输入时重建等于每敲一个字就把输入框拆了重装，焦点与组字状态全丢。
+  if(rebuild) renderSlots();
   page = 0;
   runSearch();
 }
@@ -538,8 +612,8 @@ async function boot(){
 
 function init(){
   renderSlots();
-  $("#add-slot").onclick = () => { slots.push(emptySlot()); syncFromForm(); };
-  $("#clear-slots").onclick = () => { slots = [emptySlot()]; syncFromForm(); };
+  $("#add-slot").onclick = () => { slots.push(emptySlot()); syncFromForm(true); };
+  $("#clear-slots").onclick = () => { slots = [emptySlot()]; syncFromForm(true); };
   $("#sort").onchange = () => { page = 0; runSearch(); };
   $("#idiom").onchange = () => { page = 0; runSearch(); };
 

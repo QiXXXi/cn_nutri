@@ -198,6 +198,7 @@
 
     const IS_ALNUM = /^[\p{L}\p{N}]$/u;
     const IS_SPACE = /^\s$/;
+    const IS_ALPHA = /^[A-Za-z]$/;        // 标记标签：单个 ASCII 字母
 
     function normalizeSymbols(text) {
       let out = "";
@@ -221,12 +222,16 @@
       this.parts = new Set(fields.parts);
       this.ids = new Set(fields.ids);
       this.literals = new Set(fields.literals);
+      // 相等/不等标记（=A / ≠A）。唯一**跨字位**的一类条件：见 applyMarks。
+      this.eq = new Set(fields.eq);
+      this.neq = new Set(fields.neq);
     }
 
     CharConstraint.prototype.isEmpty = function () {
       return !(this.finals.size || this.initials.size || this.tones.size ||
                this.strokes.length || this.structures.size || this.liushu.size ||
-               this.parts.size || this.ids.size || this.literals.size);
+               this.parts.size || this.ids.size || this.literals.size ||
+               this.eq.size || this.neq.size);
     };
 
     /** 展开成笔画数集合；无笔画条件时返回 null。 */
@@ -248,6 +253,8 @@
     /** 给前端逐字表单用的结构形（DSL 是给人看的，这个是给表单用的）。 */
     CharConstraint.prototype.toDict = function () {
       return {
+        eq: cpSorted([...this.eq]),
+        neq: cpSorted([...this.neq]),
         finals: cpSorted([...this.finals]),
         initials: cpSorted([...this.initials].map(i => i === "" ? "xx" : i)),
         tones: [...this.tones].sort((a, b) => a - b),
@@ -262,8 +269,10 @@
 
     /** 反向序列化，供表单 <-> 文本框双向同步。无任何条件时输出 []。 */
     CharConstraint.prototype.toDsl = function () {
-      const items = [...this.tones].sort((a, b) => a - b)
-        .map(t => t === 5 ? "~5" : "~" + t);
+      const items = cpSorted([...this.eq]).map(L => "=" + L);
+      items.push(...cpSorted([...this.neq]).map(L => "≠" + L));
+      items.push(...[...this.tones].sort((a, b) => a - b)
+        .map(t => t === 5 ? "~5" : "~" + t));
       items.push(...this.strokes.map(([op, n]) => strokeToDsl(op, n)));
       items.push(...cpSorted([...this.structures]));
       items.push(...cpSorted([...this.liushu]));
@@ -279,8 +288,31 @@
 
     /* ---- 单条件分类 ---- */
 
+    /**
+     * `=A` / `≠A` / `!=A` -> ["eq"|"neq", "A"]；不是标记返回 null。
+     * 标签必须是**单个 ASCII 字母**，统一大写（=a 与 =A 是同一个标签）。
+     * 对应 query._parse_mark()。
+     */
+    function parseMark(item) {
+      let kind, label;
+      if (item[0] === "=") { kind = "eq"; label = item.slice(1); }
+      else if (item[0] === "≠") { kind = "neq"; label = item.slice(1); }
+      else if (item.slice(0, 2) === "!=") { kind = "neq"; label = item.slice(2); }
+      else return null;
+      const cps = Array.from(label);
+      if (cps.length !== 1) return null;
+      const ch = cps[0];
+      if (ch.codePointAt(0) > 0x7f) return null;          // isascii()
+      if (!IS_ALPHA.test(ch)) return null;
+      return [kind, ch.toUpperCase()];
+    }
+
     function classify(item) {
       if (!item) return null;
+
+      // 标记排在最前：`=` / `≠` 打头的串落不进下面任何一类，先判不会抢走谁。
+      const mark = parseMark(item);
+      if (mark !== null) return mark;
 
       if (item[0] === "~") {
         const body = item.slice(1);
@@ -331,7 +363,8 @@
     function parseConstraintGroup(body, offset, ignored) {
       const acc = { finals: new Set(), initials: new Set(), tones: new Set(),
                     strokes: [], structures: new Set(), liushu: new Set(),
-                    parts: new Set(), ids: new Set(), literals: new Set() };
+                    parts: new Set(), ids: new Set(), literals: new Set(),
+                    eq: new Set(), neq: new Set() };
       // 逗号与空白都是分隔符。空白单独出现时不该变成条件，所以当作分隔比
       // 「删掉再拼」更贴合意图：[a e] 显然是两个条件，而不是无法识别的 "ae"。
       for (const raw of body.split(/[,\s]+/)) {
@@ -368,10 +401,36 @@
       return -1;
     }
 
+    /**
+     * 校验相等/不等标记。slots 是 [槽起点偏移, 约束] 的数组。
+     *
+     * ≠A **允许**写在 =A 之前——匹配时由「悬空义务」兜住（见 applyMarks）。
+     * 所以这里只查两种真正的错：全式压根没有 =A，以及同一字位里 =A 与 ≠A 自相矛盾。
+     * 对应 query._validate_marks()。
+     */
+    function validateMarks(slots, errors) {
+      const defined = new Set();
+      for (const [, c] of slots) for (const L of c.eq) defined.add(L);
+
+      for (const [offset, c] of slots) {
+        for (const L of c.eq) {
+          if (!c.neq.has(L)) continue;
+          errors.push({ text: "=" + L + ",≠" + L, offset,
+                        reason: "=" + L + " 与 ≠" + L + " 不能写在同一字位" });
+        }
+        for (const L of c.neq) {
+          if (c.eq.has(L) || defined.has(L)) continue;
+          errors.push({ text: "≠" + L, offset,
+                        reason: "≠" + L + " 没有对应的 =" + L });
+        }
+      }
+    }
+
     function parsePattern(text) {
       const norm = normalizeSymbols(text);
       const normArr = Array.from(norm);
       const ignored = [], errors = [], elements = [];
+      const slots = [];                      // 供标记校验用
       const n = normArr.length;
       let i = 0;
 
@@ -403,9 +462,10 @@
           if (close < 0) { errors.push({ text: norm.slice(i), offset: i,
                                          reason: "方括号未闭合" }); break; }
           const groupOff = i + 1;
-          elements.push({ kind: "slot",
-                          c: parseConstraintGroup(norm.slice(groupOff, close),
-                                                  groupOff, ignored) });
+          const constraint = parseConstraintGroup(norm.slice(groupOff, close),
+                                                  groupOff, ignored);
+          elements.push({ kind: "slot", c: constraint });
+          slots.push([i, constraint]);
           i = close + 1;
           continue;
         }
@@ -434,19 +494,25 @@
 
       // 把 "lit"/"slot"/"any"/"star" 编译成扫描时用的紧凑形
       const els = [];
-      let hasStar = false, fixedLen = 0;
+      let hasStar = false, fixedLen = 0, hasMarks = false;
       for (const el of elements) {
         // 每个字位都恰好占一个字：[]、字面、? 都算，* 不算（它长度不定）。
         // 漏掉 slot 会让 [a,an,ang][~3,~4][7-][独体,左右] 报成「匹配 0 字词」。
-        if (el.kind === "slot") { els.push(["slot", el.c]); fixedLen++; }
+        if (el.kind === "slot") {
+          els.push(["slot", el.c]); fixedLen++;
+          // 扫描热路径要按它决定走不走标记那套，算一次就够，别每个词算一遍
+          if (el.c.eq.size || el.c.neq.size) hasMarks = true;
+        }
         else if (el.kind === "lit") { els.push(["lit", el.ch]); fixedLen++; }
         else if (el.kind === "any") { els.push(["any", null]); fixedLen++; }
         else { els.push(["star", null]); hasStar = true; }
       }
 
+      validateMarks(slots, errors);
+
       return {
         elements, ignored, errors, source: text, normalized: norm,
-        compiled: { elements: els, hasStar },
+        compiled: { elements: els, hasStar, hasMarks },
         fixedLength: hasStar ? null : fixedLen,
         toDsl() {
           return elements.map(el => el.kind === "lit" ? el.ch
@@ -660,6 +726,7 @@
       strokeSet: c.strokeSet(),
       structIds, liushuIds, partIds,
       ids: c.ids,
+      eqLabels: [...c.eq], neqLabels: [...c.neq],
       // Python 里判「有没有这一类条件」用的是集合非空，而不是「有没有命中任何值」。
       // 分开记是必须的：结构名若都不在表里，仍然要强制走「结构数据缺失 -> 判不了」
       // 这条路，而不是变成「无条件」。
@@ -670,6 +737,60 @@
   }
 
   const TRUE_VERDICT = 1, FALSE_VERDICT = 0, UNKNOWN_VERDICT = -1;
+
+  /** 尚未有任何绑定/义务时的初始状态。无标记的模式自始至终都用它。 */
+  const NO_MARKS = { bind: {}, oblig: [] };
+
+  /**
+   * 一个 [] 的相等/不等标记并入游标状态。对应 matcher._apply_marks()。
+   *
+   * 词是**给定的**，所以这里比的全是已经确定的字，不需要搜索。唯一麻烦的是
+   * ≠A 可能写在 =A 之前——那会儿还不知道 A 绑到哪个字位，于是先把 (A, 字位)
+   * 记成一条**悬空义务**，等后面某个字位绑上 A 时回头兑现。
+   *
+   * `cpAt(pos)` 取该字位的码位。状态一律**只读**：每次返回新对象，
+   * 所以 globMatch 回溯时天然不用撤销。
+   *
+   * 返回 null 表示不满足；否则返回新状态。
+   */
+  function applyMarks(p, wi, cpAt, st) {
+    const ch = cpAt(wi);
+    let bind = st.bind, oblig = st.oblig;
+
+    for (const L of p.eqLabels) {
+      const prev = bind[L];
+      if (prev === undefined) {
+        if (bind === st.bind) bind = Object.assign({}, bind);
+        bind[L] = ch;
+      } else if (prev !== ch) {
+        return null;                                    // 已绑过，必须同字
+      }
+    }
+
+    // 刚绑上的标签，可能正欠着前面某个 ≠ 的义务
+    for (const [L, oi] of oblig) {
+      if (bind[L] !== undefined && cpAt(oi) === bind[L]) return null;
+    }
+
+    for (const L of p.neqLabels) {
+      if (bind[L] !== undefined) {
+        if (ch === bind[L]) return null;
+      } else {
+        oblig = oblig.concat([[L, wi]]);
+      }
+    }
+    return { bind, oblig };
+  }
+
+  /** 状态的 memo key。无标记时是常量空串，拼进去也不额外花时间。 */
+  function marksKey(st) {
+    if (st === NO_MARKS) return "";
+    let s = "";
+    for (const L of Object.keys(st.bind).sort()) s += L + st.bind[L] + ";";
+    s += "|";
+    for (const [L, wi] of st.oblig) s += L + wi + ";";
+    return s;
+  }
 
   /**
    * 一个字是否满足约束。TRUE/FALSE 是判定，UNKNOWN 表示数据缺失。
@@ -838,6 +959,7 @@
 
     const ctx = this.ctx, compiled = p.compiled;
     const els = compiled.elements, hasStar = compiled.hasStar;
+    const hasMarks = compiled.hasMarks;
 
     // 编译约束：只做一次，别在 36.8 万次扫描里反复建 Set。
     // 同一个 Pattern 可能被搜两次（表单和文本框各一次），所以标记一下。
@@ -878,8 +1000,8 @@
         for (let ri = 0; ri < readCount; ri++) {
           const sylBase = W.readsOff + 2 * L * ri;
           const spans = hasStar
-            ? globMatch(els, C, W, sylBase, n, nReads ? ri : -1, ctx, unknown)
-            : scanFixed(els, C, W, sylBase, n, nReads ? ri : -1, ctx, unknown);
+            ? globMatch(els, C, W, sylBase, n, nReads ? ri : -1, ctx, unknown, hasMarks)
+            : scanFixed(els, C, W, sylBase, n, nReads ? ri : -1, ctx, unknown, hasMarks);
           if (spans !== null) { hit = { wi, ri: nReads ? ri : -1, spans }; break; }
         }
 
@@ -906,12 +1028,20 @@
   };
 
   /** 定长直路：无 * 时不需要回溯。 */
-  function scanFixed(els, C, W, sylBase, n, ri, ctx, unknown) {
+  function scanFixed(els, C, W, sylBase, n, ri, ctx, unknown, hasMarks) {
     const spans = [];
+    let st = NO_MARKS;
+    // 只有带标记的模式才需要这个取码位的闭包，别让 36.8 万次扫描各建一个
+    const cpAt = hasMarks ? (pos => C.cps[C.u16(W.charsOff + 2 * pos)]) : null;
     for (let i = 0; i < els.length; i++) {
       const kind = els[i][0], payload = els[i][1];
       const ci = C.u16(W.charsOff + 2 * i);
       if (kind === "slot") {
+        if (payload.eqLabels.length || payload.neqLabels.length) {
+          // 标记先判：它冲突是**确定**的不匹配，不该被记成「数据缺失」
+          st = applyMarks(payload, i, cpAt, st);
+          if (st === null) return null;
+        }
         const si = ri < 0 ? -1 : C.u16(sylBase + 2 * i);
         const verdict = matchPrepared(payload, ci, si, ctx);
         if (verdict === UNKNOWN_VERDICT) { unknown.add(C.cps[ci]); return null; }
@@ -925,12 +1055,16 @@
   }
 
   /** 含 * 时的记忆化回溯。成功返回每个非 * 元素命中的字位。 */
-  function globMatch(els, C, W, sylBase, n, ri, ctx, unknown) {
+  function globMatch(els, C, W, sylBase, n, ri, ctx, unknown, hasMarks) {
     const en = els.length;
     const memo = new Map();
+    const cpAt = hasMarks ? (pos => C.cps[C.u16(W.charsOff + 2 * pos)]) : null;
+    // 有标记时 memo key 必须带上绑定状态，否则两条到达同一 (ei, wi) 的路径会
+    // 互相冒用对方的结果。无标记时 marksKey 恒为 ""，与原来的整数键等价。
 
-    function rec(ei, wi) {
-      const key = ei * (n + 1) + wi;
+    function rec(ei, wi, st) {
+      const base = ei * (n + 1) + wi;
+      const key = hasMarks ? base + "|" + marksKey(st) : base;
       const cached = memo.get(key);
       if (cached !== undefined) return cached;
 
@@ -945,7 +1079,7 @@
 
       if (kind === "star") {
         for (let k = wi; k <= n; k++) {
-          const tail = rec(ei + 1, k);
+          const tail = rec(ei + 1, k, st);
           if (tail !== null) { out = tail; break; }
         }
       } else if (wi >= n) {
@@ -953,18 +1087,27 @@
       } else {
         const ci = C.u16(W.charsOff + 2 * wi);
         let ok = false;
+        let nst = st;
         if (kind === "any") {
           ok = true;
         } else if (kind === "lit") {
           ok = String.fromCodePoint(C.cps[ci]) === payload;
         } else {
-          const si = ri < 0 ? -1 : C.u16(sylBase + 2 * wi);
-          const verdict = matchPrepared(payload, ci, si, ctx);
-          if (verdict === UNKNOWN_VERDICT) unknown.add(C.cps[ci]);
-          else if (verdict === TRUE_VERDICT) ok = true;
+          if (payload.eqLabels.length || payload.neqLabels.length) {
+            nst = applyMarks(payload, wi, cpAt, st);
+            ok = nst !== null;
+          } else {
+            ok = true;
+          }
+          if (ok) {
+            const si = ri < 0 ? -1 : C.u16(sylBase + 2 * wi);
+            const verdict = matchPrepared(payload, ci, si, ctx);
+            if (verdict === UNKNOWN_VERDICT) { unknown.add(C.cps[ci]); ok = false; }
+            else if (verdict === FALSE_VERDICT) ok = false;
+          }
         }
         if (ok) {
-          const tail = rec(ei + 1, wi + 1);
+          const tail = rec(ei + 1, wi + 1, nst);
           if (tail !== null) out = [wi, ...tail];
         }
       }
@@ -973,7 +1116,7 @@
       return out;
     }
 
-    return rec(0, 0);
+    return rec(0, 0, NO_MARKS);
   }
 
   Engine.prototype._hitKey = function (h, sort) {

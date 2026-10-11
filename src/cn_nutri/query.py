@@ -10,8 +10,12 @@
     结构  独体 左右 上下 …     六书  象形 指事 会意 形声
     部件  裸写单字（氵 日 …）   拆字  ⿰弓长（以 IDS 算子开头）
     字面  (沐露二勾恶感)
+    标记  =A 同字 / ≠A 不同字
 
 ``声母表 ∩ 韵母表 = ∅`` 是这个设计成立的前提，tests 里有断言守着。
+
+标记是唯一**跨字位**的一类：``[=A][][=A][≠A]`` 表示第 1、3 字相同、第 4 字与它们
+不同。``≠A`` 允许写在 ``=A`` 之前，非法只有一种——全式压根没有 ``=A``。
 
 DSL 只是**序列化格式**，不是真相来源：网页表单直接构造同样的约束模型，
 两条路径共用 matcher/rank，行为不会漂移。
@@ -127,13 +131,18 @@ class CharConstraint:
     parts: frozenset[str] = frozenset()      # 部首或部件，见 matcher 的并集语义
     ids: frozenset[str] = frozenset()        # 精确 IDS 串
     literals: frozenset[str] = frozenset()
+    #: 相等/不等标记的标签（``=A`` / ``≠A``）。它是唯一**跨字位**的一类条件：
+    #: 所有带 =A 的字位必须是同一个字，带 ≠A 的字位必须与它不同。
+    #: 标签是单个字母，解析时统一大写。
+    eq: frozenset[str] = frozenset()
+    neq: frozenset[str] = frozenset()
 
     def is_empty(self) -> bool:
         """无任何条件——等价于「任意一个字」。"""
         return not (
             self.finals or self.initials or self.tones or self.strokes
             or self.structures or self.liushu or self.parts or self.ids
-            or self.literals
+            or self.literals or self.eq or self.neq
         )
 
     def stroke_set(self) -> frozenset[int] | None:
@@ -153,6 +162,8 @@ class CharConstraint:
     def to_dict(self) -> dict:
         """给前端逐字表单用的结构形（DSL 是给人看的，这个是给表单用的）。"""
         return {
+            "eq": sorted(self.eq),
+            "neq": sorted(self.neq),
             "finals": sorted(self.finals),
             "initials": ["xx" if i == "" else i for i in sorted(self.initials)],
             "tones": sorted(self.tones),
@@ -166,7 +177,9 @@ class CharConstraint:
 
     def to_dsl(self) -> str:
         """反向序列化，供前端表单 <-> 文本框双向同步。无任何条件时输出 ``[]``。"""
-        items = [f"~{t}" if t != 5 else "~5" for t in sorted(self.tones)]
+        items = [f"={L}" for L in sorted(self.eq)]
+        items += [f"≠{L}" for L in sorted(self.neq)]
+        items += [f"~{t}" if t != 5 else "~5" for t in sorted(self.tones)]
         items += [_stroke_to_dsl(op, n) for op, n in self.strokes]
         items += sorted(self.structures)
         items += sorted(self.liushu)
@@ -247,6 +260,26 @@ class Pattern:
 # 单条件分类
 # --------------------------------------------------------------------------
 
+def _parse_mark(item: str) -> tuple[str, str] | None:
+    """``=A`` / ``≠A`` / ``!=A`` -> ``("eq"|"neq", "A")``；不是标记返回 None。
+
+    标签必须是**单个 ASCII 字母**，统一成大写（``=a`` 与 ``=A`` 是同一个标签）。
+    ``!=`` 是给键盘的退路——``≠`` 在不少输入法里不好打；``！＝`` 打出来会先被
+    全半角归一变成 ``!=``，白捡。
+    """
+    if item.startswith("="):
+        kind, label = "eq", item[1:]
+    elif item.startswith("≠"):
+        kind, label = "neq", item[1:]
+    elif item.startswith("!="):
+        kind, label = "neq", item[2:]
+    else:
+        return None
+    if len(label) != 1 or not label.isascii() or not label.isalpha():
+        return None
+    return kind, label.upper()
+
+
 def _classify(item: str) -> tuple[str, object] | None:
     """判断一个条件属于哪一类，返回 (字段名, 值)；无法识别返回 None。
 
@@ -254,6 +287,11 @@ def _classify(item: str) -> tuple[str, object] | None:
     """
     if not item:
         return None
+
+    # 标记排在最前：`=` / `≠` 打头的串落不进下面任何一类，先判不会抢走谁。
+    mark = _parse_mark(item)
+    if mark is not None:
+        return mark
 
     if item.startswith("~"):
         body = item[1:]
@@ -300,6 +338,7 @@ def parse_constraint_group(
         "finals": set(), "initials": set(), "tones": set(),
         "strokes": [], "structures": set(), "liushu": set(),
         "parts": set(), "ids": set(), "literals": set(),
+        "eq": set(), "neq": set(),
     }
     # 逗号与空白都是分隔符。空白单独出现时不该变成条件，所以当作分隔比
     # 「删掉再拼」更贴合意图：[a e] 显然是两个条件，而不是无法识别的 "ae"。
@@ -337,6 +376,8 @@ def parse_constraint_group(
         parts=frozenset(acc["parts"]),
         ids=frozenset(acc["ids"]),
         literals=frozenset(acc["literals"]),
+        eq=frozenset(acc["eq"]),
+        neq=frozenset(acc["neq"]),
     )
 
 
@@ -355,12 +396,37 @@ def _parse_literal_group(body: str, offset: int, ignored: list[ParseIssue]) -> s
 # 顶层模式解析
 # --------------------------------------------------------------------------
 
+def _validate_marks(
+    slots: list[tuple[int, CharConstraint]], errors: list[ParseIssue]
+) -> None:
+    """校验相等/不等标记。``slots`` 是 (槽起点偏移, 约束) 的序列。
+
+    ``≠A`` **允许**写在 ``=A`` 之前——匹配时由「悬空义务」兜住（见 matcher）。
+    所以这里只查两种真正的错：全式压根没有 ``=A``，以及同一字位里 ``=A`` 与
+    ``≠A`` 自相矛盾。
+    """
+    defined: set[str] = set()
+    for _, c in slots:
+        defined |= c.eq
+
+    for offset, c in slots:
+        for label in sorted(c.eq & c.neq):
+            errors.append(ParseIssue(
+                f"={label},≠{label}", offset,
+                f"={label} 与 ≠{label} 不能写在同一字位"))
+        for label in sorted(c.neq - c.eq):
+            if label not in defined:
+                errors.append(ParseIssue(
+                    f"≠{label}", offset, f"≠{label} 没有对应的 ={label}"))
+
+
 def parse_pattern(text: str) -> Pattern:
     """把整条查询解析成模式。整词锚定，支持 ``?`` 与 ``*``。"""
     norm = _normalize_symbols(text)
     ignored: list[ParseIssue] = []
     errors: list[ParseIssue] = []
     elements: list[Element] = []
+    slots: list[tuple[int, CharConstraint]] = []      # 供标记校验用
 
     i = 0
     n = len(norm)
@@ -400,8 +466,9 @@ def parse_pattern(text: str) -> Pattern:
                 errors.append(ParseIssue(norm[i:], i, "方括号未闭合"))
                 break
             group_off = i + 1
-            elements.append(Slot(parse_constraint_group(
-                norm[group_off:close], group_off, ignored)))
+            constraint = parse_constraint_group(norm[group_off:close], group_off, ignored)
+            elements.append(Slot(constraint))
+            slots.append((i, constraint))
             i = close + 1
             continue
 
@@ -427,4 +494,5 @@ def parse_pattern(text: str) -> Pattern:
         ignored.append(ParseIssue(ch, i, "无法识别"))
         i += 1
 
+    _validate_marks(slots, errors)
     return Pattern(elements, ignored, errors, text, norm)
