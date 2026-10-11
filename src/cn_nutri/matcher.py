@@ -6,6 +6,11 @@
    可忽略）。
 2. **属性层**：落在一个约束槽上的字，逐类比对它的笔画/结构/部件/该语境下的读音。
 
+子集（``$姓氏``）**不在这两层里**：它的成员可以是两个字，判定要看**后一个字**，
+而属性层只拿得到一个字。所以它和相等/不等标记一样由结构层处理——那里的
+``_scan`` / ``_glob`` 手里有整词和当前字位。区别是子集不改变游标状态，只做一个
+位置判定，所以不进 ``_glob`` 的 memo key。
+
 多音字按**词在该语境下的读音**判定（银行 yínháng ≠ 行走 xíngzòu）：一套读音里
 每个位置都有确定的音节。一词多读时任一套满足即命中，并记下是哪一套以便高亮。
 
@@ -26,6 +31,7 @@ from typing import NamedTuple, Sequence
 
 from .pinyin import Syllable
 from .query import AnyChar, CharConstraint, Element, Literal, Pattern, Slot, Star
+from .subsets import PREPARED
 
 __all__ = ["CharInfo", "Word", "Match", "MatchStats", "Matcher", "match_char"]
 
@@ -91,6 +97,22 @@ def _prepare(c: CharConstraint) -> tuple:
         c.stroke_set(), c.structures, c.liushu, c.parts, c.ids,
         c.eq, c.neq,
     )
+
+
+def _subset_hit(refs: tuple, word: str, wi: int) -> bool:
+    """``word`` 的第 ``wi`` 位是否落在某个引用到的子集里。
+
+    ``refs`` 是 ``((单字集, 两字集), …)``——组内多个子集名取**并集**，与组内其它
+    条件的并集语义一致。单字成员只比当前字；两字成员还要看后一个字，所以词尾的
+    字位只能靠单字成员成立（``[$节气]`` 因此匹配不到单字词，这是成员全是两字的
+    自然结果，不是特例）。
+    """
+    ch = word[wi]
+    nxt = word[wi + 1:wi + 2]          # 越界时是空串，落不进任何两字成员
+    for one, two in refs:
+        if ch in one or (nxt and ch + nxt in two):
+            return True
+    return False
 
 
 def _apply_marks(
@@ -188,37 +210,63 @@ def match_prepared(p: tuple, ch: str, syl: Syllable | None,
 
 def match_char(c: CharConstraint, ch: str, syl: Syllable | None,
                info: CharInfo | None) -> bool | None:
-    """一个字是否满足约束。None 表示因数据缺失而无法判定。"""
+    """一个字是否满足约束。None 表示因数据缺失而无法判定。
+
+    带子集的约束**判不了**：两字成员要看后一个字，而这个入口只有一个字。
+    返回 None 而不是 True 是刻意的——``match_prepared`` 会把子集当成「无条件」，
+    直接放行就成了把「不知道」当成「满足」。真正的判定在 ``_scan`` / ``_glob``。
+    """
+    if c.subsets:
+        return None
     return match_prepared(_prepare(c), ch, syl, info)
 
 
-#: 编译后的模式元素：("lit", 字) / ("slot", 预编译约束) / ("any", None)
+#: 编译后的模式元素，一律是三元组 ``(种类, 载荷, 子集引用)``。
+#: ``("lit", 字, None)`` / ``("slot", 预编译约束, 引用)`` / ``("any", None, None)``
+#: / ``("star", None, None)``。第三项是 ``((单字集, 两字集), …)`` 或 None，
+#: 放在这里而不是塞进 ``_prepare`` 的载荷，是因为 ``match_prepared`` 看不到后一个字。
 Compiled = NamedTuple("Compiled", [("elements", list), ("has_star", bool)])
 
 
 class Matcher:
     """持有字形索引，对模式做全量扫描。"""
 
-    def __init__(self, chars: dict[str, CharInfo]) -> None:
+    def __init__(self, chars: dict[str, CharInfo],
+                 subsets: dict[str, tuple[str, ...]] | None = None) -> None:
         self.chars = chars
+        # 名字 -> (单字集, 两字集)。默认用内置词表，测试可以传自己的小词表。
+        self.subsets = PREPARED if subsets is None else {
+            name: (frozenset(m for m in members if len(m) == 1),
+                   frozenset(m for m in members if len(m) == 2))
+            for name, members in subsets.items()
+        }
         self.stats = MatchStats()
         self._scratch: set[str] = set()
 
     # ---- 编译 -----------------------------------------------------------
     def compile(self, pattern: Pattern) -> Compiled:
         """把模式的每个元素换成扫描时的紧凑表示。每个查询只做一次。"""
-        els: list[tuple[str, object]] = []
+        els: list[tuple[str, object, tuple | None]] = []
+        subsets = self.subsets
         has_star = False
         for el in pattern.elements:
             if isinstance(el, Slot):
-                els.append(("slot", _prepare(el.constraint)))
+                c = el.constraint
+                # 名字由 parse_constraint_group 过一遍词表，正常到不了这里查不到。
+                # 真查不到（手工构造的约束、或词表和解析器不同步）时**取不出来就
+                # 不取**：refs 可能是空元组，_subset_hit 对它恒为假 —— 即「不命中」。
+                # 不能退回 None（那是「这个字位没有子集条件」），那会把它悄悄放行成
+                # 任意一字。JS 侧找不到名字时也是不命中，两端必须一致。
+                refs = (tuple(subsets[n] for n in sorted(c.subsets) if n in subsets)
+                        if c.subsets else None)
+                els.append(("slot", _prepare(c), refs))
             elif isinstance(el, Literal):
-                els.append(("lit", el.ch))
+                els.append(("lit", el.ch, None))
             elif isinstance(el, AnyChar):
-                els.append(("any", None))
+                els.append(("any", None, None))
             else:
                 has_star = True
-                els.append(("star", None))
+                els.append(("star", None, None))
         return Compiled(els, has_star)
 
     # ---- 结构层 ---------------------------------------------------------
@@ -229,10 +277,13 @@ class Matcher:
         spans = []
         bind: tuple = ()
         oblig: tuple = ()
-        for i, (kind, payload) in enumerate(els):
+        for i, (kind, payload, refs) in enumerate(els):
             ch = word[i]
             if kind == "slot":
-                # 标记先判：它冲突是**确定**的不匹配，不该被记成「数据缺失」
+                # 子集与标记都先判：它们冲突是**确定**的不匹配，不该被记成
+                # 「数据缺失」。子集不看游标状态，所以判断顺序无所谓。
+                if refs is not None and not _subset_hit(refs, word, i):
+                    return None
                 ok, bind, oblig = _apply_marks(payload, word, i, bind, oblig)
                 if not ok:
                     return None
@@ -266,7 +317,7 @@ class Matcher:
                 memo[key] = res
                 return res
 
-            kind, payload = els[ei]
+            kind, payload, refs = els[ei]
             out: list[int] | None = None
 
             if kind == "star":
@@ -276,6 +327,8 @@ class Matcher:
                         out = tail
                         break
             elif wi >= m:
+                out = None
+            elif kind == "slot" and refs is not None and not _subset_hit(refs, word, wi):
                 out = None
             elif kind == "any":
                 tail = rec(ei + 1, wi + 1, bind, oblig)

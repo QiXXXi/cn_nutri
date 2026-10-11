@@ -191,6 +191,8 @@
     const IDS_OPS = new Set(T.ids_operators);
     const RANGES = T.han_ranges;
     const MAX_STROKES = T.max_strokes;
+    // 子集是词汇表（同 structures/liushu），来自 tables.json，不进二进制。
+    const SUBSETS = T.subsets || {};
 
     function isHan(ch) {
       const cp = ch.codePointAt(0);
@@ -224,6 +226,9 @@
       this.parts = new Set(fields.parts);
       this.ids = new Set(fields.ids);
       this.literals = new Set(fields.literals);
+      // 子集名（$姓氏）。成员可以是 1 或 2 个字，判定要看后一个字，所以跟标记
+      // 一样是**跨字位**的——见 subsetHit。
+      this.subsets = new Set(fields.subsets);
       // 相等/不等标记（=A / ≠A）。唯一**跨字位**的一类条件：见 applyMarks。
       this.eq = new Set(fields.eq);
       this.neq = new Set(fields.neq);
@@ -233,7 +238,7 @@
       return !(this.finals.size || this.initials.size || this.tones.size ||
                this.strokes.length || this.structures.size || this.liushu.size ||
                this.parts.size || this.ids.size || this.literals.size ||
-               this.eq.size || this.neq.size);
+               this.subsets.size || this.eq.size || this.neq.size);
     };
 
     /** 展开成笔画数集合；无笔画条件时返回 null。 */
@@ -266,6 +271,7 @@
         parts: cpSorted([...this.parts]),
         ids: cpSorted([...this.ids]),
         literals: cpSorted([...this.literals]),
+        subsets: cpSorted([...this.subsets]),
       };
     };
 
@@ -273,6 +279,9 @@
     CharConstraint.prototype.toDsl = function () {
       const items = cpSorted([...this.eq]).map(L => "=" + L);
       items.push(...cpSorted([...this.neq]).map(L => "≠" + L));
+      // 子集紧跟标记。顺序必须与 query.CharConstraint.to_dsl 及表单的 slotToDsl
+      // 一致，否则表单 <-> 文本框同步会来回改写表达式。
+      items.push(...cpSorted([...this.subsets]).map(s => "$" + s));
       items.push(...[...this.tones].sort((a, b) => a - b)
         .map(t => t === 5 ? "~5" : "~" + t));
       items.push(...this.strokes.map(([op, n]) => strokeToDsl(op, n)));
@@ -362,16 +371,33 @@
     }
 
     /** 解析 [] 里的内容（已去掉方括号）。 */
-    function parseConstraintGroup(body, offset, ignored) {
+    function parseConstraintGroup(body, offset, ignored, errors) {
       const acc = { finals: new Set(), initials: new Set(), tones: new Set(),
                     strokes: [], structures: new Set(), liushu: new Set(),
                     parts: new Set(), ids: new Set(), literals: new Set(),
-                    eq: new Set(), neq: new Set() };
+                    subsets: new Set(), eq: new Set(), neq: new Set() };
       // 逗号与空白都是分隔符。空白单独出现时不该变成条件，所以当作分隔比
       // 「删掉再拼」更贴合意图：[a e] 显然是两个条件，而不是无法识别的 "ae"。
       for (const raw of body.split(/[,\s]+/)) {
         const item = raw.trim();
         if (!item) continue;
+
+        // 子集：$姓氏。`$` 是个明确的信号——后面一定是子集名，所以打错字是
+        // **错误**而不是噪音。若当成「无法识别」丢掉，这个字位会悄悄变成
+        // 「任意一个字」，正是「把不知道当成满足」。
+        if (item[0] === "$") {
+          const name = item.slice(1);
+          if (!name) {
+            errors.push({ text: raw.trim(), offset,
+                          reason: "$ 后面要写子集名，如 $姓氏" });
+          } else if (SUBSETS[name] !== undefined) {
+            acc.subsets.add(name);
+          } else {
+            errors.push({ text: raw.trim(), offset,
+                          reason: "没有名为「" + name + "」的子集" });
+          }
+          continue;
+        }
 
         if (item.length >= 2 && item[0] === "(" && item[item.length - 1] === ")") {
           for (const c of parseLiteralGroup(item.slice(1, -1), offset, ignored)) {
@@ -447,6 +473,17 @@
           continue;
         }
         if (ch === "?") { elements.push({ kind: "any" }); i++; continue; }
+
+        // 子集条件是**组内**的一个条件项，裸写在 [] 外面没有意义。若不拦，
+        // `$姓氏` 会被拆成一个被忽略的 `$` 加两个字面槽 [姓][氏]——看起来合理，
+        // 其实完全不是用户的意思。
+        if (ch === "$") {
+          errors.push({ text: ch, offset: i,
+                        reason: "子集条件要写在方括号里，如 [$姓氏]" });
+          i++;
+          continue;
+        }
+
         if (ch === "*") {
           if (!elements.length || elements[elements.length - 1].kind !== "star") {
             elements.push({ kind: "star" });
@@ -465,7 +502,7 @@
                                          reason: "方括号未闭合" }); break; }
           const groupOff = i + 1;
           const constraint = parseConstraintGroup(norm.slice(groupOff, close),
-                                                  groupOff, ignored);
+                                                  groupOff, ignored, errors);
           elements.push({ kind: "slot", c: constraint });
           slots.push([i, constraint]);
           i = close + 1;
@@ -721,6 +758,18 @@
     const literals = new Set();
     for (const ch of c.literals) literals.add(ch.codePointAt(0));
 
+    // 子集引用 ((单字下标集, 两字下标集), …)。同伴随用并集，判定见 subsetHit。
+    // 名字由 parseConstraintGroup 保证合法；取不到时按「不命中」处理——方向是
+    // 安全的（宁可漏，不可把不知道当成满足）。
+    let subsetRefs = null;
+    if (c.subsets.size) {
+      subsetRefs = [];
+      for (const name of c.subsets) {
+        const idx = ctx.subsetIndex.get(name);
+        if (idx !== undefined) subsetRefs.push(idx);
+      }
+    }
+
     return {
       empty: c.isEmpty(),
       literals,
@@ -728,6 +777,7 @@
       strokeSet: c.strokeSet(),
       structIds, liushuIds, partIds,
       ids: c.ids,
+      subsetRefs,
       eqLabels: [...c.eq], neqLabels: [...c.neq],
       // Python 里判「有没有这一类条件」用的是集合非空，而不是「有没有命中任何值」。
       // 分开记是必须的：结构名若都不在表里，仍然要强制走「结构数据缺失 -> 判不了」
@@ -736,6 +786,26 @@
       hasTone: c.tones.size > 0, hasStruct: c.structures.size > 0,
       hasLiushu: c.liushu.size > 0, hasParts: c.parts.size > 0, hasIds: c.ids.size > 0,
     };
+  }
+
+  /**
+   * word 的第 wi 位是否落在某个引用到的子集里。对应 matcher._subset_hit()。
+   *
+   * refs 是 ((单字下标集, 两字下标集), …)——组内多个子集名取**并集**。单字成员只比
+   * 当前字；两字成员还要看后一个字，所以词尾的字位只能靠单字成员成立
+   * （[$节气] 因此匹配不到单字词，这是成员全是两字的自然结果，不是特例）。
+   * 成员在建集合时已经映射成字符下标，扫描时不做字符串切片。
+   */
+  function subsetHit(refs, C, W, wi, n) {
+    const ch = C.u16(W.charsOff + 2 * wi);
+    for (const s of refs) {
+      if (s.one.has(ch)) return true;
+      if (wi + 1 < n) {
+        const nx = C.u16(W.charsOff + 2 * (wi + 1));
+        if (s.two.has(ch * C.nChars + nx)) return true;
+      }
+    }
+    return false;
   }
 
   const TRUE_VERDICT = 1, FALSE_VERDICT = 0, UNKNOWN_VERDICT = -1;
@@ -906,8 +976,30 @@
     this.corpusInfo = tables.corpus;
 
     const pc = corpus;
+    // 子集词表（tables.json 的 query.subsets）在构造时编成**字符下标**集合，
+    // 此后每个字位只做两次 Set 查找，扫描热路径里一次字符串切片都没有。
+    // 成员里不在字符表的字直接丢掉——它永远匹配不上，留着只是死重量。
+    const subsetIndex = new Map();
+    for (const [name, members] of Object.entries(tables.query.subsets || {})) {
+      const one = new Set(), two = new Set();
+      for (const m of members) {
+        const ms = Array.from(m);
+        if (ms.length === 1) {
+          const a = pc.charIndex.get(ms[0].codePointAt(0));
+          if (a !== undefined) one.add(a);
+        } else {
+          const a = pc.charIndex.get(ms[0].codePointAt(0));
+          const b = pc.charIndex.get(ms[1].codePointAt(0));
+          // 两字成员编成一个下标：a * nChars + b < 7533² < 2³²，装得下
+          if (a !== undefined && b !== undefined) two.add(a * pc.nChars + b);
+        }
+      }
+      subsetIndex.set(name, { one, two });
+    }
+
     this.ctx = {
       corpus: pc,
+      subsetIndex,
       finalIndex: new Map(this.P.finals.map((f, i) => [f, i])),
       initialIndex: new Map(pc.tables.corpus.initials.map((s, i) => [s, i])),
       structIndex: new Map(pc.tables.corpus.structures.map((s, i) => [s, i])),
@@ -1039,6 +1131,11 @@
       const kind = els[i][0], payload = els[i][1];
       const ci = C.u16(W.charsOff + 2 * i);
       if (kind === "slot") {
+        // 子集与标记都先判：它们冲突是**确定**的不匹配，不该被记成「数据缺失」。
+        // 子集不看游标状态，所以判断顺序无所谓。
+        if (payload.subsetRefs !== null && !subsetHit(payload.subsetRefs, C, W, i, n)) {
+          return null;
+        }
         if (payload.eqLabels.length || payload.neqLabels.length) {
           // 标记先判：它冲突是**确定**的不匹配，不该被记成「数据缺失」
           st = applyMarks(payload, i, cpAt, st);
@@ -1094,6 +1191,9 @@
           ok = true;
         } else if (kind === "lit") {
           ok = String.fromCodePoint(C.cps[ci]) === payload;
+        } else if (payload.subsetRefs !== null &&
+                   !subsetHit(payload.subsetRefs, C, W, wi, n)) {
+          ok = false;                       // 确定不匹配
         } else {
           if (payload.eqLabels.length || payload.neqLabels.length) {
             nst = applyMarks(payload, wi, cpAt, st);

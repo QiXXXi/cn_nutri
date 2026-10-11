@@ -107,6 +107,7 @@ function loadPage() {
   init(engine, structures, liushu){
     ENG = engine; STRUCTURES = structures; LIUSHU = liushu;
     HAN_RANGES = engine.T.query.han_ranges;   // 真 boot 从同一处取
+    SUBSET_NAMES = Object.keys(engine.T.query.subsets || {});   // 同上
     boot = async () => {};          // 真 boot 要 fetch 词库；这里已经装好了
     init();
     syncFromDsl();                  // 真 boot 的尾巴

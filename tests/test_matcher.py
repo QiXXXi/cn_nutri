@@ -319,3 +319,102 @@ def test_mark_conflict_is_a_plain_miss_not_missing_data():
     assert m.match(parse_pattern("[=A][=A]"), w) is None
     assert m.stats.excluded_missing == 0
     assert m.stats.missing_chars == set()
+
+# ------------------------------------------------------------------- 子集
+#
+# 子集是第二条跨字位条件，也是**唯一成员可以有两个字**的一类：判定要看后一个字，
+# 所以它跟标记一样走 _scan/_glob，不走 match_prepared（那个只看得到一个字）。
+# 这里用自造的小词表测语义，不碰内置的 810 个姓氏——那条在 test_query.py 里守数据。
+# 用的字都取自本文件顶上的 CHARS，否则会撞上「字符数据缺失」。
+
+def submatcher(pairs):
+    """pairs 形如 {"姓氏": ("沐", "张白")}。"""
+    return Matcher(CHARS, pairs)
+
+
+def test_two_char_member_needs_the_next_char():
+    """★ 用户点名的语义：`[$姓氏][][][]` 靠「张白」这个两字成员命中，
+    而元素位仍然只占**一个字位**（四个元素配四个字）。"""
+    m = submatcher({"姓氏": ("沐", "张白")})
+    assert hit(m, "张白沐江", s(1, 1, 1, 1), "[$姓氏][][][]")
+    assert hit(m, "沐白张江", s(1, 1, 1, 1), "[$姓氏][][][]")     # 靠单字成员
+    assert not hit(m, "白张沐江", s(1, 1, 1, 1), "[$姓氏][][][]")  # 「白张」不是成员
+
+
+def test_member_only_matches_where_the_element_lands():
+    """子集是**位置**判定：`[][$姓氏][]` 里「张白」得从第 2 个字位起。"""
+    m = submatcher({"姓氏": ("张白",)})
+    assert hit(m, "沐张白", s(1, 1, 1), "[][$姓氏][]")
+    assert not hit(m, "张白沐", s(1, 1, 1), "[][$姓氏][]")
+
+
+def test_a_two_char_member_does_not_swallow_the_next_slot():
+    """两字成员只让**本字位**成立，不占掉下一个元素的位置。
+
+    词是「张白日」，`[$姓氏][5][4]` 里第 2 位必须是「白」（5 画）——若子集把
+    「白」吃掉了，第 2 位就会落到「日」上，4 画那条对不上。
+    """
+    m = submatcher({"姓氏": ("张白",)})
+    assert hit(m, "张白日", s(1, 1, 1), "[$姓氏][5][4]")
+    assert not hit(m, "张白沐", s(1, 1, 1), "[$姓氏][5][4]")   # 沐 7 画
+
+
+def test_two_char_member_cannot_reach_past_the_end():
+    """词尾那个字位只有单字成员能救——单独一个「白」不是成员。"""
+    m = submatcher({"姓氏": ("张白",)})
+    assert not hit(m, "张白", s(1, 1), "[][$姓氏]")
+    m2 = submatcher({"姓氏": ("张白", "白")})
+    assert hit(m2, "张白", s(1, 1), "[][$姓氏]")
+
+
+def test_several_subsets_on_one_slot_are_a_union():
+    """组内同类取并集：[$姓氏,$朝代] = 姓氏或朝代。"""
+    m = submatcher({"姓氏": ("张",), "朝代": ("明",)})
+    assert hit(m, "张", s(1), "[$姓氏,$朝代]")
+    assert hit(m, "明", s(1), "[$姓氏,$朝代]")
+    assert not hit(m, "沐", s(1), "[$姓氏,$朝代]")
+
+
+def test_subset_composes_with_other_conditions():
+    """异类取交集：既要属于子集，又得满足别的条件。"""
+    m = submatcher({"姓氏": ("张", "白")})
+    assert hit(m, "张白", s(1, 1), "[$姓氏][5]")
+    assert not hit(m, "张日", s(1, 1), "[$姓氏][5]")   # 日 4 画
+    assert not hit(m, "沐白", s(1, 1), "[$姓氏][5]")   # 沐 不在子集里
+
+
+def test_subset_miss_is_a_plain_miss_not_missing_data():
+    """子集不命中是**确定**的不匹配，不该被记进 excluded_missing。"""
+    m = submatcher({"姓氏": ("张",)})
+    assert m.match(parse_pattern("[$姓氏]"), word("江", s(1))) is None
+    assert m.stats.excluded_missing == 0
+    assert m.stats.missing_chars == set()
+
+
+def test_subset_works_through_the_glob_path():
+    """含 * 时走 _glob。子集不改变游标状态，所以不进 memo 键——但语义要一致。"""
+    m = submatcher({"姓氏": ("张白",)})
+    assert hit(m, "明张白日", s(1, 1, 1, 1), "*[$姓氏]*")
+    assert not hit(m, "明白江日", s(1, 1, 1, 1), "*[$姓氏]*")
+
+
+def test_match_char_refuses_a_subset_constraint():
+    """★ match_char 只有一个字，判不了带子集的约束，必须返回 None。
+
+    返回 True 才是灾难：match_prepared 会把子集当成「无条件」，于是
+    `[$姓氏]` 匹配**所有**字——正是「把不知道当成满足」。"""
+    c = parse_pattern("[$姓氏]").elements[0].constraint
+    assert match_char(c, "江", None, info("江")) is None
+    # 同一个约束不碰子集那一类时照常判得了
+    plain = parse_pattern("[左右]").elements[0].constraint
+    assert match_char(plain, "江", None, info("江", structure="左右")) is True
+
+
+def test_matcher_without_the_named_subset_is_a_miss_not_a_crash():
+    """名字由解析器过词表，正常到不了这里。真到不了时按「不命中」处理，
+    不要抛 KeyError 炸掉整条查询——**而且要和 JS 侧一致**：engine.js 找不到
+    名字时就是把这个字位判死。
+    """
+    m = Matcher(CHARS, {})
+    assert m.match(parse_pattern("[$姓氏]"), word("张", s(1))) is None
+    assert m.stats.excluded_missing == 0

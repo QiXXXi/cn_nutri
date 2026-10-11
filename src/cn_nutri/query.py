@@ -9,13 +9,17 @@
     声调  ~1 ~2 ~3 ~4         笔画  8 = 恰八画 / 8- = ≤8 / 16+ = ≥16
     结构  独体 左右 上下 …     六书  象形 指事 会意 形声
     部件  裸写单字（氵 日 …）   拆字  ⿰弓长（以 IDS 算子开头）
-    字面  (沐露二勾恶感)
+    字面  (沐露二勾恶感)        子集  $姓氏（成员见 subsets.py）
     标记  =A 同字 / ≠A 不同字
 
 ``声母表 ∩ 韵母表 = ∅`` 是这个设计成立的前提，tests 里有断言守着。
 
 标记是唯一**跨字位**的一类：``[=A][][=A][≠A]`` 表示第 1、3 字相同、第 4 字与它们
 不同。``≠A`` 允许写在 ``=A`` 之前，非法只有一种——全式压根没有 ``=A``。
+子集也跨字位（两字成员要看后一个字），但它不改变游标状态，只做一个位置判定。
+
+子集名不认识时**报错**而不是忽略：``$`` 已经明确宣告了后面是子集名，留着一个
+被忽略的 ``$`` 会把这个字位悄悄放宽成「任意一字」。
 
 DSL 只是**序列化格式**，不是真相来源：网页表单直接构造同样的约束模型，
 两条路径共用 matcher/rank，行为不会漂移。
@@ -36,6 +40,7 @@ from .pinyin import (
     canonical_initial,
     display_final,
 )
+from .subsets import SUBSETS
 
 __all__ = [
     "CharConstraint", "Literal", "Slot", "AnyChar", "Star", "Pattern",
@@ -107,6 +112,9 @@ CLIENT_TABLES = {
     "punct_map": dict(_PUNCT_MAP),
     "tone_tokens": dict(_TONE_TOKENS),
     "max_strokes": MAX_STROKES,
+    # 子集是**词汇表**（同 structures/liushu），所以走 tables.json，不进二进制。
+    # JS 侧据此既校验 `$名字` 是否合法，也把成员编成字符下标集合。
+    "subsets": {name: list(members) for name, members in SUBSETS.items()},
 }
 
 
@@ -131,6 +139,9 @@ class CharConstraint:
     parts: frozenset[str] = frozenset()      # 部首或部件，见 matcher 的并集语义
     ids: frozenset[str] = frozenset()        # 精确 IDS 串
     literals: frozenset[str] = frozenset()
+    #: 子集名（``$姓氏``）。成员可以是 1 或 2 个字，判定要用到**后一个字**，
+    #: 所以这一类跟标记一样是跨字位的，由 matcher 在能拿到整词的地方判。
+    subsets: frozenset[str] = frozenset()
     #: 相等/不等标记的标签（``=A`` / ``≠A``）。它是唯一**跨字位**的一类条件：
     #: 所有带 =A 的字位必须是同一个字，带 ≠A 的字位必须与它不同。
     #: 标签是单个字母，解析时统一大写。
@@ -142,7 +153,7 @@ class CharConstraint:
         return not (
             self.finals or self.initials or self.tones or self.strokes
             or self.structures or self.liushu or self.parts or self.ids
-            or self.literals or self.eq or self.neq
+            or self.literals or self.subsets or self.eq or self.neq
         )
 
     def stroke_set(self) -> frozenset[int] | None:
@@ -173,12 +184,16 @@ class CharConstraint:
             "parts": sorted(self.parts),
             "ids": sorted(self.ids),
             "literals": sorted(self.literals),
+            "subsets": sorted(self.subsets),
         }
 
     def to_dsl(self) -> str:
         """反向序列化，供前端表单 <-> 文本框双向同步。无任何条件时输出 ``[]``。"""
         items = [f"={L}" for L in sorted(self.eq)]
         items += [f"≠{L}" for L in sorted(self.neq)]
+        # 子集紧跟标记。JS 的 CharConstraint.toDsl 与表单的 slotToDsl 必须同序，
+        # 否则表单 <-> 文本框同步会来回改写表达式。
+        items += [f"${s}" for s in sorted(self.subsets)]
         items += [f"~{t}" if t != 5 else "~5" for t in sorted(self.tones)]
         items += [_stroke_to_dsl(op, n) for op, n in self.strokes]
         items += sorted(self.structures)
@@ -331,20 +346,35 @@ def _classify(item: str) -> tuple[str, object] | None:
 
 
 def parse_constraint_group(
-    body: str, offset: int, ignored: list[ParseIssue]
+    body: str, offset: int, ignored: list[ParseIssue], errors: list[ParseIssue]
 ) -> CharConstraint:
     """解析 ``[]`` 里的内容（已去掉方括号）。"""
     acc: dict[str, set] = {
         "finals": set(), "initials": set(), "tones": set(),
         "strokes": [], "structures": set(), "liushu": set(),
         "parts": set(), "ids": set(), "literals": set(),
-        "eq": set(), "neq": set(),
+        "subsets": set(), "eq": set(), "neq": set(),
     }
     # 逗号与空白都是分隔符。空白单独出现时不该变成条件，所以当作分隔比
     # 「删掉再拼」更贴合意图：[a e] 显然是两个条件，而不是无法识别的 "ae"。
     for raw in re.split(r"[,\s]+", body):
         item = raw.strip()
         if not item:
+            continue
+
+        # 子集：$姓氏。`$` 是个明确的信号——后面一定是子集名，所以打错字是
+        # **错误**而不是噪音。若当成「无法识别」丢掉，这个字位会悄悄变成
+        # 「任意一个字」，正是「把不知道当成满足」。
+        if item.startswith("$"):
+            name = item[1:]
+            if not name:
+                errors.append(ParseIssue(raw.strip(), offset,
+                                         "$ 后面要写子集名，如 $姓氏"))
+            elif name in SUBSETS:
+                acc["subsets"].add(name)
+            else:
+                errors.append(ParseIssue(raw.strip(), offset,
+                                         f"没有名为「{name}」的子集"))
             continue
 
         # 字面集：(沐露二勾恶感)
@@ -376,6 +406,7 @@ def parse_constraint_group(
         parts=frozenset(acc["parts"]),
         ids=frozenset(acc["ids"]),
         literals=frozenset(acc["literals"]),
+        subsets=frozenset(acc["subsets"]),
         eq=frozenset(acc["eq"]),
         neq=frozenset(acc["neq"]),
     )
@@ -457,6 +488,14 @@ def parse_pattern(text: str) -> Pattern:
             i += 1
             continue
 
+        # 子集条件是**组内**的一个条件项，裸写在 [] 外面没有意义。若不拦，
+        # `$姓氏` 会被拆成一个被忽略的 `$` 加两个字面槽 [姓][氏]——看起来合理，
+        # 其实完全不是用户的意思。
+        if ch == "$":
+            errors.append(ParseIssue(ch, i, "子集条件要写在方括号里，如 [$姓氏]"))
+            i += 1
+            continue
+
         if ch in "[【〔":
             close = min(
                 (p for p in (norm.find(c, i + 1) for c in "]】〕") if p >= 0),
@@ -466,7 +505,8 @@ def parse_pattern(text: str) -> Pattern:
                 errors.append(ParseIssue(norm[i:], i, "方括号未闭合"))
                 break
             group_off = i + 1
-            constraint = parse_constraint_group(norm[group_off:close], group_off, ignored)
+            constraint = parse_constraint_group(
+                norm[group_off:close], group_off, ignored, errors)
             elements.append(Slot(constraint))
             slots.append((i, constraint))
             i = close + 1

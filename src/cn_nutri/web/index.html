@@ -169,10 +169,11 @@ const $ = s => document.querySelector(s);
 
 const TONES = [1,2,3,4,5];
 
-// 词汇表不写死在这里：结构名与六书名由 tables.json 下发（服务端也是同一份）。
+// 词汇表不写死在这里：结构名、六书名、子集名由 tables.json 下发（服务端也是同一份）。
 // 之前这里手抄了一份，漏了「转注」「假借」，表单里就选不出来。
 let STRUCTURES = [];
 let LIUSHU = [];
+let SUBSET_NAMES = [];
 
 //: 客户端引擎。为 null 表示词库没加载成功，退回服务端 /api/* 那条路。
 let ENG = null;
@@ -189,12 +190,13 @@ const PAGE = 20;
 function emptySlot(kind){
   return {kind: kind || "slot",
           eq:[],neq:[],literals:[],finals:[],initials:[],tones:[],strokes:[],
-          structures:[],liushu:[],parts:[],ids:[]};
+          structures:[],liushu:[],parts:[],ids:[],subsets:[]};
 }
 function isAny(s){
   return !(s.eq.length||s.neq.length||
            s.literals.length||s.finals.length||s.initials.length||s.tones.length||
-           s.strokes.length||s.structures.length||s.liushu.length||s.parts.length||s.ids.length);
+           s.strokes.length||s.structures.length||s.liushu.length||s.parts.length||
+           s.ids.length||s.subsets.length);
 }
 
 /* 汉字范围表（tables.json 的 query 段 / /api/meta 各下发一份，与解析器同一张表）。
@@ -237,6 +239,7 @@ function slotToDsl(s){
   if(s.kind === "star") return "*";
   const items = [];
   items.push(...marksToDsl(s));          // 与 Python to_dsl 同序：标记在最前
+  items.push(...s.subsets.map(n => "$"+n));   // 子集紧跟标记，再往后是声调
   items.push(...s.tones.map(t => "~"+t));
   items.push(...strokesToDsl(s.strokes));
   items.push(...s.structures);
@@ -284,6 +287,7 @@ function dslToSlots(elements){
       s.liushu     = c.liushu.slice();
       s.parts      = c.parts.slice();
       s.ids        = c.ids.slice();
+      s.subsets    = c.subsets.slice();
       out.push(s);
     } else if(el.kind === "any" || el.kind === "star"){
       out.push(emptySlot(el.kind));       // ? / * 各是一张卡片，原文照旧写回
@@ -377,7 +381,13 @@ function fieldsHtml(i, s){
       </div></div>
       <div class="fld"><label>部首 / 部件（如 氵 日）</label>
         <input type="text" data-k="parts" data-i="${i}"
-               value="${s.parts.join("")}" placeholder="氵"></div>`;
+               value="${s.parts.join("")}" placeholder="氵"></div>
+      <div class="fld"><label>子集（成员见说明，$姓氏 也能命中复姓）</label>
+        <input type="text" data-k="subsets" data-i="${i}"
+               value="${s.subsets.join(",")}" placeholder="姓氏"></div>
+      <div class="fld"><label></label><div class="chips" data-k="subsets" data-i="${i}">
+        ${SUBSET_NAMES.map(v=>`<button data-v="${v}" class="${s.subsets.includes(v)?"on":""}">$${v}</button>`).join("")}
+      </div></div>`;
 }
 
 function renderSlots(){
@@ -678,6 +688,8 @@ async function boot(){
     STRUCTURES = ENG.T.query.structures;
     LIUSHU = ENG.T.query.liushu;
     HAN_RANGES = ENG.T.query.han_ranges;
+    // 子集只取**名字**给按钮用；成员在引擎里，匹配时才用得上。
+    SUBSET_NAMES = Object.keys(ENG.T.query.subsets || {});
     const c = ENG.T.corpus;
     note.textContent = "";
     console.log("cn_nutri 客户端引擎 v" + CnNutri.VERSION,
@@ -693,6 +705,7 @@ async function boot(){
       STRUCTURES = meta.structures || [];
       LIUSHU = meta.liushu || [];
       HAN_RANGES = meta.han_ranges || [];
+      SUBSET_NAMES = meta.subsets || [];
       note.textContent = "词库未能本地加载，已退回服务端查询（首次部署需先跑 " +
                          "tools/build_client_data.py）。";
     }catch(e){

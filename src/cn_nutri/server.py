@@ -23,6 +23,7 @@ from .pinyin import format_pinyin
 from .query import HAN_RANGES, LIUSHU_NAMES, STRUCTURES, parse_pattern
 from .rank import SORT_MODES
 from .search import MAX_RESULTS, search
+from .subsets import SUBSET_NAMES
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -169,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
                         "n_chars": len(self.corpus.chars),
                         "structures": list(STRUCTURES),
                         "liushu": list(LIUSHU_NAMES),
+                        # 子集只下发**名字**：表单拿它渲染 $姓氏 那一排按钮。成员
+                        # 只有匹配时才用得上，而匹配在服务端做，不必过网。
+                        "subsets": list(SUBSET_NAMES),
                         # 表单判「这个字面写不写得回表达式」要用；客户端引擎那条路
                         # 从 tables.json 的 query 段取同一张表。
                         "han_ranges": [list(r) for r in HAN_RANGES],

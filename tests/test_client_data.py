@@ -144,8 +144,11 @@ def test_tables_json_carries_every_vocabulary(built):
                 "final_aliases", "display_final", "zero_form", "parse_prefixes"):
         assert key in t["pinyin"], key
     for key in ("structures", "liushu", "ids_operators", "han_ranges",
-                "punct_map", "tone_tokens", "max_strokes"):
+                "punct_map", "tone_tokens", "max_strokes", "subsets"):
         assert key in t["query"], key
+    # 子集是**词汇表**，所以走 tables.json 而不是二进制——它的成员是字符串，
+    # 塞进 corpus.bin 只会让那个文件为一件与词库无关的事改版。
+    assert t["query"]["subsets"]["节气"][:2] == ["立春", "雨水"]
 
     # 音节表存的是下标，这三张表必须一一对上
     assert len(t["corpus"]["initials"]) == 1 + len(t["pinyin"]["initials"])

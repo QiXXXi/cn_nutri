@@ -299,3 +299,103 @@ def test_mark_dsl_roundtrip():
 def test_marks_sort_before_other_conditions_in_dsl():
     """to_dsl 的项序就是文本框的内容，标记必须固定排在最前，不然会自己跳。"""
     assert one("[~3,=B,≠A,a,7]").to_dsl() == "[=B,≠A,~3,7,a]"
+
+
+# ------------------------------------------------------------------ 子集
+
+def test_subset_is_a_slot_condition_not_a_new_element():
+    """`$姓氏` 是 [] 里的一个条件项，跟 [独体]、[氵] 同级——元素序列不变。"""
+    p = parse_pattern("[$姓氏][]")
+    assert p.fixed_length() == 2
+    assert [type(e).__name__ for e in p.elements] == ["Slot", "Slot"]
+    assert p.elements[0].constraint.subsets == {"姓氏"}
+    assert p.elements[1].constraint.is_empty()
+
+
+def test_subset_does_not_count_as_empty():
+    """子集非空 = 这个字位有约束。漏了它，`[$姓氏]` 会退化成「任意一个字」。"""
+    assert not one("[$姓氏]").is_empty()
+    assert one("[]").is_empty()
+
+
+def test_subset_coexists_with_other_conditions():
+    c = one("[=A,$姓氏,~3]")
+    assert c.subsets == {"姓氏"} and c.eq == {"A"} and c.tones == {3}
+
+
+def test_several_subsets_on_one_slot_are_a_union():
+    """组内同类取并集：[$姓氏,$朝代] = 姓氏或朝代。"""
+    assert one("[$姓氏,$朝代]").subsets == {"姓氏", "朝代"}
+
+
+def test_unknown_subset_name_is_an_error_not_ignored():
+    """名字不认识要**拦住查询**，不能当成「无法识别」丢掉。
+
+    丢掉的话这个字位会悄悄变成「任意一个字」——正是「把不知道当成满足」，
+    而且用户根本不会发现 `$姓氐` 打错了。
+    """
+    p = parse_pattern("[$姓氐]")
+    assert not p.ignored
+    assert len(p.errors) == 1
+    assert p.errors[0].reason == "没有名为「姓氐」的子集"
+
+
+def test_empty_subset_name_says_so():
+    p = parse_pattern("[$]")
+    assert len(p.errors) == 1
+    assert p.errors[0].reason == "$ 后面要写子集名，如 $姓氏"
+
+
+def test_dollar_outside_brackets_is_an_error():
+    """裸写 `$姓氏` 若不拦，会被拆成一个被忽略的 `$` 加两个字面槽 [姓][氏]。
+
+    那看起来合理、其实完全不是用户的意思，所以宁可报错。
+    """
+    p = parse_pattern("$姓氏")
+    assert len(p.errors) == 1
+    assert p.errors[0].reason == "子集条件要写在方括号里，如 [$姓氏]"
+
+
+def test_escaped_dollar_is_still_a_literal():
+    r"""`\$` 是那个字符本身——转义分支排在 `$` 分支前面。"""
+    p = parse_pattern(r"\$")
+    assert not p.errors and not p.ignored
+    assert isinstance(p.elements[0], Literal) and p.elements[0].ch == "$"
+
+
+def test_subset_dsl_roundtrip():
+    """往返稳定。子集排在标记之后、声调之前，这个次序就是文本框的内容。"""
+    for src in ("[$姓氏]", "[$姓氏][][][]", "[$节气][]", "[$姓氏,$朝代]",
+                "[=A,$姓氏,~3]"):
+        once = parse_pattern(src).to_dsl()
+        assert once == src, f"{src} -> {once}"
+        assert parse_pattern(once).to_dsl() == once
+        assert not parse_pattern(once).errors
+
+
+def test_subset_sorts_after_marks_and_before_everything_else():
+    assert one("[~3,$姓氏,=B,a,7]").to_dsl() == "[=B,$姓氏,~3,7,a]"
+
+
+def test_tables_carry_the_subset_vocabulary():
+    """子集是词汇表，走 tables.json。JS 侧据此校验名字、编成员下标。"""
+    from cn_nutri.query import CLIENT_TABLES
+    from cn_nutri.subsets import SUBSETS
+
+    assert CLIENT_TABLES["subsets"] == {n: list(m) for n, m in SUBSETS.items()}
+
+
+def test_every_member_is_one_or_two_han_chars():
+    """成员长度规则是整条语义的前提：两字成员靠后一个字成立。
+
+    顺带守住「百家姓末尾那串其实是单姓两两并排」（墨哈、谯笪…）没被当成复姓抄进来——
+    那条要是抄了，三字以上的成员会在这里露头。
+    """
+    from cn_nutri.query import _is_han
+    from cn_nutri.subsets import SUBSETS
+
+    for name, members in SUBSETS.items():
+        for m in members:
+            assert len(m) in (1, 2), f"{name} 的成员 {m!r} 既不是 1 字也不是 2 字"
+            assert all(_is_han(c) for c in m), f"{name} 的成员 {m!r} 里有非汉字"
+        assert len(set(members)) == len(members), f"{name} 有重复成员"
