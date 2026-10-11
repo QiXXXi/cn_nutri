@@ -79,11 +79,21 @@ def corpus():
 
 # ------------------------------------------------------------------ 词库不变量
 
+#: 语料里仅有的两个「连读音都没有」的字。它们不在 pinyin-data 里，
+#: 所以单字词只能是空读音，只剩字面/部件条件能命中它们。
+NO_READING_CHARS = {"𠈌", "𣸨"}
+
+
 def test_corpus_invariants(corpus):
-    """构建流程承诺过的东西：词长 2–12、每个词都有读音、读音与词长对齐。"""
+    """构建流程承诺过的东西：词长 1–12、读音与词长对齐。
+
+    词长下界是 1：语料的 7,533 个字都作为单字词收进来了（所以 `[日]` 不再是空集）。
+    「每个词都有读音」这条只剩两个字豁免——不是放宽断言，是**钉死**豁免名单：
+    多豁免一个就说明某个字的读音没读进来。
+    """
     assert corpus.all_words
-    assert all(2 <= len(w.word) <= 12 for w in corpus.all_words)
-    assert not [w for w in corpus.all_words if not w.reads]
+    assert all(1 <= len(w.word) <= 12 for w in corpus.all_words)
+    assert {w.word for w in corpus.all_words if not w.reads} == NO_READING_CHARS
     assert not [w for w in corpus.all_words
                 if any(len(r) != len(w.word) for r in w.reads)]
 

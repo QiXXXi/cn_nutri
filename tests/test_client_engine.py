@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import build_client_data as bcd  # noqa: E402
 from cn_nutri.corpus import load_corpus  # noqa: E402
+from cn_nutri.matcher import Matcher  # noqa: E402
 from cn_nutri.query import parse_pattern  # noqa: E402
 from cn_nutri.search import search  # noqa: E402
 from cn_nutri.server import parse_payload, search_payload  # noqa: E402
@@ -75,7 +76,7 @@ SEARCH_JOBS: list[tuple[str, dict]] = [
     ("[a,an,ang][~3,~4][7-][独体,左右]", {"limit": 25, "sort": "pinyin"}),
     ("[a,an,ang][~3,~4][7-][独体,左右]", {"limit": 25, "sort": "len"}),
 
-    # 含 * ：走回溯，且要扫全量 36.8 万词
+    # 含 * ：走回溯，且要扫全量 37.6 万词
     ("*[氵]*", {"limit": 30}),
     ("*[氵]*", {"limit": 30, "sort": "len"}),
     ("*[左右][7-]*", {"limit": 40}),
@@ -91,10 +92,6 @@ SEARCH_JOBS: list[tuple[str, dict]] = [
     ("[xx][a]", {"limit": 25}),
 
     # 部首 / 拆字 / 韵母归一化：必须走 * 的形式。
-    # **词库里没有单字词**（最短 2 字，来自 CC-CEDICT + jieba 都只收词），
-    # 所以 `[日]`、`[⿰弓长]` 这类单个 [] 恒为空——它们描述的是一字词。
-    # 计划 §九.6 写的「[氵] 应命中 沐/江/海」按字面根本不可能成立，那个用例
-    # 从设计上就是错的；下面这几条改成等价的可实现形式。
     ("*[日]*", {"limit": 30}),
     ("*[⿰弓长]*", {"limit": 10}),
     ("*[⿱艹化]*", {"limit": 10}),
@@ -103,13 +100,23 @@ SEARCH_JOBS: list[tuple[str, dict]] = [
     ("*[氵,~3]*", {"limit": 10}),          # 部首 ∩ 声调：异类取交集
     ("[氵][~3]", {"limit": 10}),           # 定长版，走 scanFixed 而不是 globMatch
 
-    # 空约束 / 无法识别的词条 -> 应被忽略，[镶嵌] 退化成「任意一个字」
+    # ★ 单字词：语料的 7,533 个字现在都是 1 字词，所以**单个 [] 不再恒为空**。
+    # 这几条正是「加单字」这次改动的锚点，命中数逐条钉在 GOLDEN_TOTALS 里。
+    # 注意 `[ang]`：行/上/让…只要**任一套**读音的韵母是 ang 就算命中——单字没有
+    # 词级语境，读音的歧义是并列收下而不是挑一个。
+    ("[]", {"limit": 20}),                 # 空槽 = 任意一字 -> 全部单字
+    ("[日]", {"limit": 20}),
+    ("[⿰弓长]", {"limit": 10}),
+    ("[~1]", {"limit": 20}),
+    ("[ang]", {"limit": 20}),
+
+    # 空约束 / 无法识别的词条 -> 整组被忽略，退化成「任意一个字」
     ("[镶嵌]", {"limit": 10}),
     ("[这是啥,idontknow]", {"limit": 5}),
 
-    # 「没有单字词」这条事实本身也要钉住：两条都必须为空
-    ("[日]", {"limit": 10}),
-    ("[⿰弓长]", {"limit": 10}),
+    # `[]` 与 `?` 在引擎里必须**完全等价**（表单里它们倒是两种卡片：`?` 原文照写），
+    # 与上面那条 `?[~1]` 同数才算过。
+    ("[][~1]", {"limit": 20}),
 
     # 成语筛选
     ("[左右][左右]", {"idiomOnly": True, "limit": 20}),
@@ -145,20 +152,35 @@ SEARCH_JOBS: list[tuple[str, dict]] = [
 
 #: 本来就该**没有结果**的作业，逐条有理由。剩下的作业一条都不许为空——
 #: 两边都返回空时比对也是绿的，那样套子等于没测。
+#
+#: 加单字词之后只剩 `[镶嵌]` 一条「合法但空」的用例了：`[日]`、`[⿰弓长]`、
+#: MESSY、`[这是啥,idontknow]` 都变成有结果（见 GOLDEN_TOTALS）。
 EXPECTED_EMPTY = {
-    "[镶嵌]": "「镶嵌」不在查询侧的结构词表里，被忽略后 [..] 退化成「任意一个字」，"
-              "而库里没有单字词",
-    "[这是啥,idontknow]": "整组条件都无法识别，同样退化成「任意一个字」",
-    "[日]": "单个 [] 描述的是一字词，库里没有",
-    "[⿰弓长]": "同上",
+    "[镶嵌]": "「镶嵌」在查询侧的 STRUCTURES 里**是有的**，所以它不是被忽略、"
+              "也没退化成任意一字——是语料里那个原值写作「嵌套结构」，两边对不上，"
+              "于是恒定不匹配。（原先这条注释说它「不在词表里、被忽略」，是错的。"
+              "用「任意一字」试它：加单字词后 `[]` 命中 7533 条，而它仍是 0。）",
     "abc": "字面 'a' 后面不是汉字，逐字匹配到没有的词",
-    MESSY: "7 类条件叠在一起（部首氵 + 声母 {m,b,xx} + 声调 {3,4} + 结构 {上下,左右} + "
-           "笔画 {≤8,=10,≥16}），命中数为 0 是数据本身的结果，不是解析出错",
     "[unclosed": "方括号未闭合",
     "张\\": "转义符后无字符",
     "(未闭": "圆括号未闭合",
     "[≠A][~1]": "≠A 在这个表达式里找不到任何 =A",
     "[=A,≠A]": "同一个字位同时要相等又要不等，自相矛盾",
+}
+
+#: 逐条钉死的命中数。查询在 SEARCH_JOBS 里出现过就行（选项不影响 total）。
+#: Python 侧由上面的逐字段比对保证同值，这里在**客户端引擎**这一侧再卡一道：
+#: 两边一起漂（比如都漏读了一批词）时，只有绝对值能发现。
+GOLDEN_TOTALS: dict[str, int] = {
+    "[]": 7533,                     # = 语料字数。空槽不约束任何东西
+    "[这是啥,idontknow]": 7533,     # 整组无法识别 -> 同样退化成任意一字
+    "[日]": 680,                    # 部首或拆字里有「日」的单字
+    "[⿰弓长]": 1,                   # 只有「张」
+    "[~1]": 2491,
+    "[ang]": 283,
+    "?[~1]": 26712,
+    "[][~1]": 26712,                # 与上一行必须相等
+    MESSY: 1,                       # 七类条件叠在一起，恰好剩「沐」
 }
 
 PARSE_JOBS: list[str] = [
@@ -316,7 +338,7 @@ def test_engine_header_agrees_with_python(js_all, corpus):
     词表本身是逐条比对的（看下面那条），这里只比总量与分桶。
     """
     s = js_all["stats"]
-    assert s["version"] == 1
+    assert s["version"] == 2      # v2：词 flags 的 bit1 = 读音取自单字表
     assert s["n_words"] == len(corpus.all_words)
     assert s["n_chars"] == len(corpus.chars)
     assert s["max_len"] == max(len(w.word) for w in corpus.all_words)
@@ -362,6 +384,60 @@ def test_the_expected_empty_ones_are_actually_empty(js_all):
 #: 所以数出来偏小。计数类断言以 tests/test_engine.py 的 GOLDEN_TOTAL 为准，这里
 #: 重复一份是为了在**客户端引擎**这一侧也卡住同一个数，两边不该给出不同答案。
 GOLDEN_TOTAL = 1590
+
+
+def test_golden_totals(js_all):
+    """命中数逐条钉死（见 GOLDEN_TOTALS）。"""
+    got = {q: js_all["search"][i]["total"]
+           for i, (q, _o) in enumerate(SEARCH_JOBS) if q in GOLDEN_TOTALS}
+    missing = sorted(set(GOLDEN_TOTALS) - set(got))
+    assert not missing, f"这些查询已经不在 SEARCH_JOBS 里了：{missing}"
+    bad = {q: (got[q], GOLDEN_TOTALS[q]) for q in GOLDEN_TOTALS
+           if got[q] != GOLDEN_TOTALS[q]}
+    assert not bad, f"命中数（实测, 预期）不符：{bad}"
+
+
+def test_empty_slot_and_question_mark_agree(js_all):
+    """`[]` 与 `?` 是同一个东西：任意一个字。
+
+    表单里它们是**两种卡片**（`?` 原文照写回，不回写成 `[]`），引擎里却必须完全
+    等价——不等价的话，用户把 `?` 换成 `[]` 会悄悄换一套结果，而这两个写法看起来
+    明明一样。两边各走一条匹配分支（AnyChar 与空 Slot），所以值得单独钉一条。
+    """
+    got = {q: js_all["search"][i]["total"]
+           for i, (q, _o) in enumerate(SEARCH_JOBS) if q in ("?[~1]", "[][~1]")}
+    assert set(got) == {"?[~1]", "[][~1]"}, "两条等价性用例都要留在 SEARCH_JOBS 里"
+    assert got["?[~1]"] == got["[][~1]"], "同一个查询的两种写法给出了不同结果"
+
+
+def test_single_char_readings_are_all_kept(corpus):
+    """多音字：这个字有几套读音就收几套，任一套满足即命中。
+
+    这是「加单字，读音标为歧义」那条决定的验收。单字**没有词级语境**——「行」在
+    「银行」里是 háng、在「行走」里是 xíng，可它单独出现时无从判断——所以不挑不猜，
+    全部并列收下。谁要是把读音截断到 5 套（客户端 flags 的逐套位只够 5 个），
+    下面这几条会红：`那` 的第 6 套正是 nǎ。
+    """
+    by = {w.word: w for w in corpus.all_words}
+    matcher = Matcher(corpus.chars)
+
+    def hits(ch, q):
+        return matcher.match(parse_pattern(q), by[ch]) is not None
+
+    xing = by["行"]
+    assert len(xing.reads) >= 5 and set(xing.read_sources) == {"char"}
+    for q in ("[ang]", "[ing]", "[~2]"):
+        assert hits("行", q), f"行 应当被 {q} 命中"
+
+    na = by["那"]
+    assert len(na.reads) > 5, "「那」有 10 套读音，正是超过逐套 flags 位的那批"
+    assert hits("那", "[a,~3]") and hits("那", "[a,~4]")   # nǎ / nà 两套都要在
+
+    for q in ("[uo]", "[u]"):
+        assert hits("和", q), f"和 应当被 {q} 命中"
+
+    # 反过来：不存在的读音不能被凑出来
+    assert not hits("那", "[ang]")
 
 
 def test_headline_query_counts_the_same_in_js(js_all):

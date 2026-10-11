@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .components import load_components
 from .corpus import DEFAULT_DB, load_corpus
 from .pinyin import format_pinyin
-from .query import LIUSHU_NAMES, STRUCTURES, parse_pattern
+from .query import HAN_RANGES, LIUSHU_NAMES, STRUCTURES, parse_pattern
 from .rank import SORT_MODES
 from .search import MAX_RESULTS, search
 
@@ -169,6 +169,9 @@ class Handler(BaseHTTPRequestHandler):
                         "n_chars": len(self.corpus.chars),
                         "structures": list(STRUCTURES),
                         "liushu": list(LIUSHU_NAMES),
+                        # 表单判「这个字面写不写得回表达式」要用；客户端引擎那条路
+                        # 从 tables.json 的 query 段取同一张表。
+                        "han_ranges": [list(r) for r in HAN_RANGES],
                         "sort_modes": list(SORT_MODES),
                         "max_results": MAX_RESULTS})
             return

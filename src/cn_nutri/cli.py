@@ -34,6 +34,10 @@ def _describe(match, corpus, mark: bool) -> str:
         src = w.read_sources[match.read_index] if match.read_index < len(w.read_sources) else ""
         if src == "inferred":
             py += "  ?"
+        elif src == "char" and len(w.reads) > 1:
+            # 单字词：没有词级语境，这个字本来就有好几套读音，命中哪一套都算。
+            # 只有一个读音的字不是歧义，不标。
+            py += "  多音"
     else:
         py = ""
 

@@ -58,6 +58,9 @@
   .slot{min-width:212px;background:var(--panel2);border:1px solid var(--line);
         border-radius:8px;padding:9px 10px}
   .slot.any{border-style:dashed;opacity:.85}
+  /* ? 与 * 卡片没有任何输入框，只有一句说明——别让它们摆出八个空栏的样子 */
+  .slot.bare{min-width:150px}
+  .slot .hint{font-size:11px;color:var(--dim);line-height:1.5}
   .slot h3{margin:0 0 7px;font-size:12px;color:var(--dim);font-weight:600;
      display:flex;justify-content:space-between;align-items:center}
   .slot h3 button{padding:0 6px;font-size:14px;line-height:1.3;border:none;
@@ -112,6 +115,9 @@
       <code>≠A</code>（也可写 <code>!=A</code>）表示与它不同。例
       <code>[=A][][=A][≠A]</code> 是「第 1、3 字相同、第 4 字不同」。
       唯一非法写法是 <code>≠A</code> 全式找不到配对的 <code>=A</code>。
+      <br>
+      下面的逐字表单里，<code>?</code> 与 <code>*</code> 各占一张卡片；含 <code>*</code> 时
+      后面的字只能标「第 N 字<b>起</b>」——<code>*</code> 不匹配字，字序就不再从卡片序号直接读出来。
     </div>
   </section>
 
@@ -121,6 +127,8 @@
     <div id="slots"></div>
     <div class="row" style="margin-top:10px">
       <button id="add-slot">+ 加一个字位</button>
+      <button id="add-any">+ 任意一字（?）</button>
+      <button id="add-star">+ 任意多个字（*）</button>
       <button id="clear-slots">清空</button>
       <span class="notice dim" id="form-note"></span>
     </div>
@@ -151,7 +159,7 @@
   </section>
 </main>
 
-<!-- 客户端引擎：解析 DSL、扫描 36.8 万词、排序全在浏览器里跑，服务器只发静态
+<!-- 客户端引擎：解析 DSL、扫描 37.6 万词、排序全在浏览器里跑，服务器只发静态
      文件。词库见 data/（由 tools/build_client_data.py 生成），说明见 README
      「客户端引擎」一节。 -->
 <script src="engine.js"></script>
@@ -175,14 +183,27 @@ let formLocked = false;     // DSL 表达不了时锁住表单
 let page = 0;
 const PAGE = 20;
 
-function emptySlot(){
-  return {eq:[],neq:[],literals:[],finals:[],initials:[],tones:[],strokes:[],
+/* 卡片种类：`slot` 是一个 [] 字位（带八个输入栏），`any` 是 `?`、`star` 是 `*`。
+   后两种没有任何字段，`kind` 就是它们的全部状态——所以 `isAny()` 对它们恒为真，
+   标题必须**先按 kind 分派**（见 slotLabel）。 */
+function emptySlot(kind){
+  return {kind: kind || "slot",
+          eq:[],neq:[],literals:[],finals:[],initials:[],tones:[],strokes:[],
           structures:[],liushu:[],parts:[],ids:[]};
 }
 function isAny(s){
   return !(s.eq.length||s.neq.length||
            s.literals.length||s.finals.length||s.initials.length||s.tones.length||
            s.strokes.length||s.structures.length||s.liushu.length||s.parts.length||s.ids.length);
+}
+
+/* 汉字范围表（tables.json 的 query 段 / /api/meta 各下发一份，与解析器同一张表）。
+   只在判「这个字面能不能写回表达式」时用；表还没到手时**不做判断**——没数据就不该锁表单。 */
+let HAN_RANGES = [];
+function isHanCp(cp){
+  if(!HAN_RANGES.length) return true;
+  for(const [lo, hi] of HAN_RANGES) if(cp >= lo && cp <= hi) return true;
+  return false;
 }
 
 /* ---------- 槽位 <-> DSL ---------- */
@@ -212,6 +233,8 @@ function parseMarks(text){
   return {eq: pick(eq), neq: pick(neq)};
 }
 function slotToDsl(s){
+  if(s.kind === "any")  return "?";
+  if(s.kind === "star") return "*";
   const items = [];
   items.push(...marksToDsl(s));          // 与 Python to_dsl 同序：标记在最前
   items.push(...s.tones.map(t => "~"+t));
@@ -237,10 +260,16 @@ function parseStrokes(text){
   }
   return out;
 }
+/* 表达式 -> 卡片。返回 {slots} 或 {error:说的哪一句}：
+   暂停同步只剩两种原因——表达式有语法错（调用方自己判），或者某个字面写不成卡片。 */
 function dslToSlots(elements){
   const out = [];
   for(const el of elements){
     if(el.kind === "literal"){
+      // 非汉字字面（abc、\* 这种）在解析器里是 `(c)`，可 `(c)` 落回表达式后会解析成
+      // **空约束**（lits 为空）——等于把 `abc` 悄悄换成「所有 3 字词」。所以宁可不转。
+      if(!isHanCp(el.ch.codePointAt(0)))
+        return {error: `表达式里的字面「${el.ch}」不是汉字，逐字表单表示不了；表单已暂停同步。`};
       const s = emptySlot(); s.literals = [el.ch]; out.push(s);
     } else if(el.kind === "slot"){
       const c = el.c, s = emptySlot();
@@ -256,11 +285,11 @@ function dslToSlots(elements){
       s.parts      = c.parts.slice();
       s.ids        = c.ids.slice();
       out.push(s);
-    } else {
-      return null;              // ? 或 * —— 表单表示不了
+    } else if(el.kind === "any" || el.kind === "star"){
+      out.push(emptySlot(el.kind));       // ? / * 各是一张卡片，原文照旧写回
     }
   }
-  return out;
+  return {slots: out};
 }
 
 /* ---------- 渲染逐字表单 ---------- */
@@ -269,12 +298,34 @@ function toggle(arr, v){ const i = arr.indexOf(v); i<0 ? arr.push(v) : arr.splic
 /* 敲键时的**就地**更新。绝不重建 DOM：正在输入的那个 <input> 一被 innerHTML
    换掉，焦点就没了；中文输入法更糟——组字状态跟着元素一起消失，候选窗直接关掉，
    于是「字面」栏根本打不出字。只刷新这一块的标题与「任意」态。 */
+/* 卡片标题。**唯一**一处把卡片序号翻译成人话的地方，renderSlots 与 refreshSlot 共用，
+   两处各写一遍必然对不上。要点：卡片序号 ≠ 字序——`*` 不占字，它后面那些字位只能
+   标「第 N 字起」（`*` 可以匹配 0 个字，所以只定得下下界）。 */
+function slotLabel(i){
+  const s = slots[i];
+  if(s.kind === "star") return "任意多个字（*）";
+  let k = 0, starBefore = false;
+  for(let j = 0; j < i; j++){
+    if(slots[j].kind === "star") starBefore = true;
+    else k++;                          // slot 与 any 都实打实占一个字
+  }
+  const base = `第 ${k+1} 字${starBefore ? "起" : ""}`;
+  if(s.kind === "any") return base + " · 任意一字";
+  return base + (isAny(s) ? " · 任意" : "");
+}
+
+/* 相邻两个 `*` 是自相矛盾的：解析器会把 `**` 折成一个 `*`，于是表单显示两张卡片、
+   表达式里只有一个星号，两边对不上。所以末尾已经是 `*` 卡时这个按钮就是死的。
+   注意只挡这一种情况——锁定时它照样能点，它正是从锁定里逃出来的路之一。 */
+function updateAddStar(){
+  $("#add-star").disabled = slots[slots.length-1].kind === "star";
+}
+
 function refreshSlot(i){
   const el = document.querySelector(`#slots .slot[data-slot="${i}"]`);
   if(!el) return;
-  const s = slots[i], any = isAny(s);
-  el.classList.toggle("any", any);
-  el.querySelector(".slot-name").textContent = `第 ${i+1} 字${any ? " · 任意" : ""}`;
+  el.classList.toggle("any", isAny(slots[i]));
+  el.querySelector(".slot-name").textContent = slotLabel(i);
 }
 
 function applyInput(inp){
@@ -297,16 +348,9 @@ function applyInput(inp){
   syncFromForm();
 }
 
-function renderSlots(){
-  const box = $("#slots");
-  box.innerHTML = "";
-  slots.forEach((s, i) => {
-    const el = document.createElement("div");
-    el.className = "slot" + (isAny(s) ? " any" : "");
-    el.dataset.slot = i;                 // refreshSlot 靠它就地找到这一块
-    el.innerHTML = `
-      <h3><span class="slot-name">第 ${i+1} 字${isAny(s) ? " · 任意" : ""}</span>
-          <button title="删除该字位" data-del="${i}">✕</button></h3>
+/* 一个字位卡片的那八个输入栏。`?` / `*` 卡片没有这些。 */
+function fieldsHtml(i, s){
+  return `
       <div class="fld"><label>字面</label>
         <input type="text" data-k="literals" data-i="${i}"
                value="${s.literals.join("")}" placeholder="如 张"></div>
@@ -334,8 +378,27 @@ function renderSlots(){
       <div class="fld"><label>部首 / 部件（如 氵 日）</label>
         <input type="text" data-k="parts" data-i="${i}"
                value="${s.parts.join("")}" placeholder="氵"></div>`;
+}
+
+function renderSlots(){
+  const box = $("#slots");
+  box.innerHTML = "";
+  slots.forEach((s, i) => {
+    const bare = s.kind !== "slot";
+    const el = document.createElement("div");
+    el.className = "slot" + (isAny(s) ? " any" : "") + (bare ? " bare" : "");
+    el.dataset.slot = i;                 // refreshSlot 靠它就地找到这一块
+    el.innerHTML = `
+      <h3><span class="slot-name">${slotLabel(i)}</span>
+          <button title="删除该字位" data-del="${i}">✕</button></h3>
+      ${bare
+        ? `<div class="hint">${s.kind === "any"
+             ? "匹配任意一个字。要给它加条件，请删掉这张卡片，改用「+ 加一个字位」。"
+             : "匹配任意多个字（也可以一个都不匹配）。"}</div>`
+        : fieldsHtml(i, s)}`;
     box.appendChild(el);
   });
+  updateAddStar();
   box.querySelectorAll("button[data-del]").forEach(b => b.onclick = () => {
     slots.splice(+b.dataset.del, 1);
     if(!slots.length) slots.push(emptySlot());
@@ -386,6 +449,9 @@ function searchQuery(q, opts){
 
 /* ---------- 双向同步 ---------- */
 let syncing = false;
+//: 提示区当前描述的是哪条表达式。表单侧靠它判断「要不要重新解析一遍」——
+//: 解析结果只喂提示区，表达式本身是表单自己写的，不需要它。
+let noticeDsl = null;
 function syncFromForm(rebuild){
   if(syncing) return;
   syncing = true;
@@ -393,11 +459,10 @@ function syncFromForm(rebuild){
   $("#dsl").value = text;
   syncing = false;
 
-  // 表单产出的表达式就是**表单自己的序列化**，按构造不可能含 ? 或 *，所以
-  // 「暂停同步」在这里必然失效，必须解除。不解除的话：表达式含 * 时表单被禁用，
-  // 此时点「清空」或「+ 加一个字位」，表达式已经变回普通式子，表单却一直灰着——
-  // 而且没有入口能把它唤醒，因为表单的输入框自己就是禁用的。
-  const wasLocked = formLocked;
+  // 表单产出的表达式就是**表单自己的序列化**，按构造一定解析得动（含 ? 与 * 也一样，
+  // 它们各有自己的卡片），所以「暂停同步」在这里必然失效，必须解除。不解除的话：
+  // 上次同步因语法错暂停，此时点「清空」或「+ 加一个字位」，表达式已经变回普通式子，
+  // 表单却一直灰着——而且没有入口能把它唤醒，因为表单的输入框自己就是禁用的。
   formLocked = false;
   $("#form-note").textContent = "";
 
@@ -405,9 +470,11 @@ function syncFromForm(rebuild){
   // 输入时重建等于每敲一个字就把输入框拆了重装，焦点与组字状态全丢。
   if(rebuild) renderSlots();
 
-  // 提示区也得跟着表达式走，不然会留着上一条「含 *」的旧话。只在刚解除暂停时
-  // 补这一次：每次敲键都补的话，退回服务端（ENG 为 null）那条路会一个字一个请求。
-  if(wasLocked) parseQuery(text).then(showParseNotice).catch(() => {});
+  // 提示区也得跟着表达式走。原来只在「刚解除暂停」时补一次，因为含 ?/* 的表达式
+  // 一定会锁表单、解锁那一刻顺手补——现在 ? 和 * 不锁了，那条路径就没了，清空之后
+  // 会留着上一步「含 *，匹配任意长度」的旧话骗人。改成**只在表达式真的变了**时补：
+  // 敲键本来就已经触发 runSearch（服务端那条路也是一个请求），不多这一下。
+  if(text !== noticeDsl) parseQuery(text).then(d => showParseNotice(d, text)).catch(() => {});
 
   page = 0;
   runSearch();
@@ -418,17 +485,17 @@ function syncFromDsl(){
   const q = $("#dsl").value;
   parseQuery(q)
     .then(d => {
-      showParseNotice(d);
-      const next = d.errors.length ? null : dslToSlots(d.elements);
-      if(next){
+      showParseNotice(d, q);
+      const r = d.errors.length
+        ? {error: "表达式有语法错误，表单已暂停同步。"}
+        : dslToSlots(d.elements);
+      if(r.slots){
         formLocked = false;
-        slots = next.length ? next : [emptySlot()];
+        slots = r.slots.length ? r.slots : [emptySlot()];
         $("#form-note").textContent = "";
       } else {
         formLocked = true;
-        $("#form-note").textContent =
-          d.errors.length ? "表达式有语法错误，表单已暂停同步。"
-                          : "该表达式含 ? 或 *，逐字表单无法表示；表单已暂停同步。";
+        $("#form-note").textContent = r.error;
       }
       syncing = false;
       renderSlots();
@@ -437,7 +504,10 @@ function syncFromDsl(){
   page = 0;
   runSearch();
 }
-function showParseNotice(d){
+/* 渲染提示区。`q` 是这条解析结果对应的表达式**原文**——显式传进来，别去读
+   `#dsl`：这是异步回调，读到的时候用户可能已经又改过了。 */
+function showParseNotice(d, q){
+  noticeDsl = q;                    // 记下提示区现在描述的是哪条表达式
   const box = $("#parse-notice");
   box.innerHTML = "";
   box.className = "notice";
@@ -450,7 +520,7 @@ function showParseNotice(d){
     box.className = "notice warn";
     box.innerHTML = "以下条件无法识别，已忽略：" +
       d.ignored.map(i => `<code>${esc(i.text)}</code>`).join("、");
-  } else if($("#dsl").value.trim()){
+  } else if(q.trim()){
     box.className = "notice dim";
     box.innerHTML = d.fixed_length !== null
       ? `匹配 ${d.fixed_length} 字词。`
@@ -467,7 +537,7 @@ function runSearch(){
     limit: PAGE, offset: page*PAGE,
     sort: $("#sort").value, idiomOnly: $("#idiom").checked,
   };
-  // 客户端引擎是**同步**的：含 * 的查询要扫 36.8 万词，直接跑会把界面卡住
+  // 客户端引擎是**同步**的：含 * 的查询要扫 37.6 万词，直接跑会把界面卡住
   // 一整秒。所以先让浏览器把「查询中」画出来，下一帧再算。
   const job = () => {
     if(seq !== searchSeq) return;              // 期间又改了条件，这次作废
@@ -512,9 +582,15 @@ function renderResults(d){
       r.spans.includes(i) ? `<span class="mk">${esc(c)}</span>` : esc(c)).join("");
     const py = r.pinyin.length
       ? r.pinyin[r.read_index] ?? r.pinyin[0] : "（无读音）";
-    const inf = r.read_sources[r.read_index] === "inferred"
-      ? `<span class="tag inf">读音推定</span>` : "";
+    const src = r.read_sources[r.read_index];
+    const inf = src === "inferred"
+      ? `<span class="tag inf">读音推定</span>`
+      // 单字词：没有词级语境，这个字本来就有好几套读音，任一套满足即命中。
+      // 只有一个读音的字不是歧义，不标。
+      : (src === "char" && r.pinyin.length > 1
+         ? `<span class="tag inf">多音</span>` : "");
     const tags = [];
+    if(r.length === 1) tags.push("单字");
     if(r.is_idiom) tags.push("成语");
     const structs = r.chars.map(c => c.structure || "?").join("/");
     if(r.chars.some(c => c.structure)) tags.push(structs);
@@ -601,6 +677,7 @@ async function boot(){
     ENG = await CnNutri.load(".");
     STRUCTURES = ENG.T.query.structures;
     LIUSHU = ENG.T.query.liushu;
+    HAN_RANGES = ENG.T.query.han_ranges;
     const c = ENG.T.corpus;
     note.textContent = "";
     console.log("cn_nutri 客户端引擎 v" + CnNutri.VERSION,
@@ -615,6 +692,7 @@ async function boot(){
       const meta = await (await fetch("/api/meta")).json();
       STRUCTURES = meta.structures || [];
       LIUSHU = meta.liushu || [];
+      HAN_RANGES = meta.han_ranges || [];
       note.textContent = "词库未能本地加载，已退回服务端查询（首次部署需先跑 " +
                          "tools/build_client_data.py）。";
     }catch(e){
@@ -628,6 +706,13 @@ async function boot(){
 function init(){
   renderSlots();
   $("#add-slot").onclick = () => { slots.push(emptySlot()); syncFromForm(true); };
+  $("#add-any").onclick  = () => { slots.push(emptySlot("any")); syncFromForm(true); };
+  $("#add-star").onclick = () => {
+    updateAddStar();
+    if($("#add-star").disabled) return;    // 末尾已是 *：再加一个会写出 `**`
+    slots.push(emptySlot("star"));
+    syncFromForm(true);
+  };
   $("#clear-slots").onclick = () => { slots = [emptySlot()]; syncFromForm(true); };
   $("#sort").onchange = () => { page = 0; runSearch(); };
   $("#idiom").onchange = () => { page = 0; runSearch(); };

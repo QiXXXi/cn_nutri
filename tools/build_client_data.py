@@ -5,7 +5,7 @@
 
 为什么要导出
 ------------
-网页版把**查询整个放在客户端**跑：解析 DSL、扫描 36.8 万词、排序，全在浏览器里
+网页版把**查询整个放在客户端**跑：解析 DSL、扫描 37.6 万词、排序，全在浏览器里
 完成，服务器只发一次静态文件。收益是**结构性**的：原先每个请求都要占着 GIL 扫
 一遍，实测 24 并发时中位延迟从 135 ms 涨到 2.5 s；挪到客户端后服务器就只是发
 静态文件。见 README「客户端引擎」。
@@ -37,24 +37,30 @@ Little-endian。先是 32 字节定长头，随后 13 个「u32 长度 + 载荷�
 词记录（词长由所在桶给出，故不重复存）：
 
     freq    u32
-    flags   u8      bit0 成语；bit(2+i) = 第 i 套读音是推定读音
+    flags   u8      bit0 成语；bit1 读音取自单字表；
+                    bit(2+i) = 第 i 套读音是推定读音（只对多字词，i ≤ 4）
     tier    u8
     n_reads u8
     chars   u16 × len
     reads   n_reads 组 u16 × len（音节表下标）
+
+单字词的读音整套都是「这个字本身有哪些读法」（``source = "char"``），一个字
+一个位，所以只用 bit1 记一次就够——它可能有 10 套读音（那、和、敦…），逐套
+标位放不下，也不该放：这些读音不是推定的，是**并列的歧义**，任一套满足即命中。
 
 省下来的三样
 ------------
 * ``pinyin_display``（4.1 MB）：由 ``format_pinyin`` 现算。没有直接存，是因为它
   是纯函数、词内每个音节都有确定的（声母, 韵母, 调），重建只要一张字表。
 * ``sort_aux``（2.9 MB）：``build_db.py`` 里它就是 ``sum(char_freq[c] for c in w)``，
-  而 char_freq 能由词表本身复原（对 freq>0 的词按字累加），所以只存 chars.cfreq
-  （30 KB）。``--check`` 会逐词验算，不是「应该能推出」而是「算出 368271 条全等」。
+  而 char_freq 能由词表本身复原（对 freq>0 的**多字**词按字累加——单字词要排除，
+  两边规则成对），所以只存 chars.cfreq（30 KB）。``--check`` 会逐词验算，
+  不是「应该能推出」而是「算出 375804 条全等」。
 * 词的文本（1.1 MB）：由 chars 段的码位拼出。
 
 字符表、部件表、音节表都**按使用次数降序**排。词记录里的下标于是绝大多数小于
-256，高字节恒为 0，gzip 能把这一半直接压掉。当前实测：含释义 12.87 MB → gzip
-5.56 MB，不含释义 8.07 MB → gzip 3.30 MB（``--no-definitions``）。
+256，高字节恒为 0，gzip 能把这一半直接压掉。当前实测：含释义 12.98 MB → gzip
+5.61 MB，不含释义 8.17 MB → gzip 3.36 MB（``--no-definitions``）。
 
 为什么是这一个文件
 ------------------
@@ -88,9 +94,16 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 MAGIC = b"CNNUTRI1"
-VERSION = 1
+#: 2 起：flags 的 bit1 改义为「读音取自单字表」（v1 里空着）。旧的 engine.js 认得
+#: 版本号就会退回服务端，好过把单字词的读音来源静默报成 cedict。
+VERSION = 2
 DEFAULT_DB = os.path.join(_ROOT, "data", "cn_nutri.db")
 DEFAULT_OUT = os.path.join(_ROOT, "src", "cn_nutri", "web", "data")
+
+#: 词 flags 的三个位。与 web/engine.js 里读它们的那几行一一对应，改一处得改两处。
+FLAG_IDIOM = 1        # bit0：成语
+FLAG_CHAR_READS = 2   # bit1：全部读音都取自单字表（单字词）
+FLAG_INFERRED_BASE = 2  # bit(2+i)：第 i 套读音是推定读音
 
 #: 段顺序。名字只用于报错与自检，写读两端都按这个顺序走。
 SECTION_NAMES = (
@@ -156,9 +169,14 @@ def build(db_path: str = DEFAULT_DB, with_definitions: bool = True) -> Bundle:
     # ---- 语料字频 --------------------------------------------------------
     # build_db.py 里 char_freq 就是对 jieba 词频按字累加，而 jieba 词频就是
     # words.freq（freq=0 的词加不加都一样），所以这里能逐字复原。
+    #
+    # **单字词必须排除**，而且要和 build_db.py 那条规则成对：那边 char_freq 也
+    # 只累加多字词。不排的话 6,857 个单字词会把它们自己的词频（合计 2,600 万）
+    # 灌进各自那一格，每个词的 sort_aux 都变，下面 check() 与 JS 端的排序立刻对不上。
+    # 理由见 build_db.py「字频」那段：这是为了不让既有 36.8 万条多字词的顺序漂移。
     cfreq: Counter = Counter()
     for r in word_rows:
-        if r["freq"] > 0:
+        if r["freq"] > 0 and len(r["word"]) > 1:
             for ch in r["word"]:
                 cfreq[ch] += r["freq"]
 
@@ -246,11 +264,17 @@ def build(db_path: str = DEFAULT_DB, with_definitions: bool = True) -> Bundle:
             rl = reads_by_word.get(r["id"], [])
             flags = 0
             if r["is_idiom"]:
-                flags |= 1
+                flags |= FLAG_IDIOM
             reads = []
             for i, (toks, source) in enumerate(rl):
                 if source == "inferred":
-                    flags |= 1 << (2 + i)
+                    if i > 4:
+                        raise SystemExit(
+                            f"{r['word']!r} 第 {i} 套读音是推定的，flags 位不够"
+                            f"（bit(2+i) 只到 bit6）")
+                    flags |= 1 << (FLAG_INFERRED_BASE + i)
+                elif source == "char":
+                    flags |= FLAG_CHAR_READS
                 # 词记录里每套读音都是定长 L 的，所以「音节数 ≠ 字数」的读音
                 # 根本存不下。实测 0 条（CEDICT 天然 1:1，推定读音也是逐字推的），
                 # 但这事不能靠「应该不会发生」——真出现了要当场炸，不能写成定长
@@ -260,8 +284,6 @@ def build(db_path: str = DEFAULT_DB, with_definitions: bool = True) -> Bundle:
                         f"{r['word']!r} 第 {i} 套读音有 {len(toks)} 个音节、"
                         f"词长 {L}——定长格式存不下，需要先改格式")
                 reads.append(tuple(syl_i[t] for t in toks))
-            if len(rl) > 5:
-                raise SystemExit(f"{r['word']!r} 有 {len(rl)} 套读音，flags 位不够")
             definition = (r["definition"] or "") if with_definitions else ""
             b.words.append((
                 int(r["freq"]), int(r["tier"]), flags,
@@ -556,17 +578,22 @@ def check(b: Bundle, db_path: str = DEFAULT_DB, with_definitions: bool = True) -
             if len(want) != L:
                 bad.append(f"{want} 落在 {L} 字桶里，实际 {len(want)} 字")
                 return bad
-            if (freq, tier, bool(flags & 1)) != (row["freq"], row["tier"],
-                                                 bool(row["is_idiom"])):
+            if (freq, tier, bool(flags & FLAG_IDIOM)) != (row["freq"], row["tier"],
+                                                          bool(row["is_idiom"])):
                 bad.append(f"{want} 的 freq/tier/成语对不上")
                 return bad
             rl = reads.get(row["id"], [])
             if len(rl) != len(wreads):
                 bad.append(f"{want} 读音套数 {len(wreads)} != {len(rl)}")
                 return bad
+            # bit1 是**词级**的（单字词整套读音同源），与逐套的推定位分开判，
+            # 与上面写侧的 `elif` 三分支对称。
+            if bool(flags & FLAG_CHAR_READS) != any(s == "char" for _, s in rl):
+                bad.append(f"{want} 的单字读音标记对不上")
+                return bad
             display = []
             for i, ((toks, source), sreads) in enumerate(zip(rl, wreads)):
-                if bool(flags & (1 << (2 + i))) != (source == "inferred"):
+                if bool(flags & (1 << (FLAG_INFERRED_BASE + i))) != (source == "inferred"):
                     bad.append(f"{want} 第 {i} 套读音的推定标记对不上")
                     return bad
                 got_toks = [f"{b.initials[b.syls[s][1]]}/{b.finals[b.syls[s][0]]}/"

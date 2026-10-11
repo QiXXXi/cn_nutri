@@ -1,6 +1,6 @@
 /* cn_nutri 客户端引擎 —— query.py / matcher.py / rank.py / pinyin.py 的移植。
  *
- * 网页版默认走这条路：DSL 解析、36.8 万词全量扫描、排序，全在浏览器里完成，
+ * 网页版默认走这条路：DSL 解析、37.6 万词全量扫描、排序，全在浏览器里完成，
  * 服务器只发一次静态文件。服务器侧的收益是**结构性**的——原先每个请求都要占着
  * GIL 扫一遍，24 并发时中位延迟从 135 ms 涨到 2.5 s（README「客户端引擎」有实测）。
  *
@@ -26,7 +26,9 @@
 "use strict";
 
 (function (global) {
-  const ENGINE_VERSION = 1;
+  // 2 起：词 flags 的 bit1 是「读音取自单字表」。与 tools/build_client_data.py 的
+  // VERSION 同步——版本不符就抛错退回服务端，好过拿旧逻辑解释新数据。
+  const ENGINE_VERSION = 2;
 
   const NULL8 = 0xff;
   const NULL16 = 0xffff;
@@ -857,7 +859,7 @@
     return TRUE_VERDICT;
   }
 
-  /** 词记录的一个可复用视图，避免为 36.8 万条各建一个对象。 */
+  /** 词记录的一个可复用视图，避免为 37.6 万条各建一个对象。 */
   function makeWordRef() {
     return { off: 0, L: 0, freq: 0, flags: 0, tier: 0, nReads: 0, charsOff: 0, readsOff: 0 };
   }
@@ -961,7 +963,7 @@
     const els = compiled.elements, hasStar = compiled.hasStar;
     const hasMarks = compiled.hasMarks;
 
-    // 编译约束：只做一次，别在 36.8 万次扫描里反复建 Set。
+    // 编译约束：只做一次，别在 37.6 万次扫描里反复建 Set。
     // 同一个 Pattern 可能被搜两次（表单和文本框各一次），所以标记一下。
     if (!compiled.prepared) {
       for (const el of els) if (el[0] === "slot") el[1] = prepareConstraint(el[1], ctx);
@@ -1031,7 +1033,7 @@
   function scanFixed(els, C, W, sylBase, n, ri, ctx, unknown, hasMarks) {
     const spans = [];
     let st = NO_MARKS;
-    // 只有带标记的模式才需要这个取码位的闭包，别让 36.8 万次扫描各建一个
+    // 只有带标记的模式才需要这个取码位的闭包，别让 37.6 万次扫描各建一个
     const cpAt = hasMarks ? (pos => C.cps[C.u16(W.charsOff + 2 * pos)]) : null;
     for (let i = 0; i < els.length; i++) {
       const kind = els[i][0], payload = els[i][1];
@@ -1206,9 +1208,13 @@
       });
     }
     const pinyin = [], sources = [];
+    // bit1 是**词级**的：单字词的每一套读音都取自单字表（这个字本身有哪些读法），
+    // 10 套也只用这一个位。逐套的 bit(2+r) 只管多字词的推定读音。
+    const charReads = (W.flags & 2) !== 0;
     for (let r = 0; r < W.nReads; r++) {
       pinyin.push(this._pinyinDisplay(h.wi, r));
-      sources.push((W.flags & (1 << (2 + r))) ? "inferred" : "cedict");
+      sources.push(charReads ? "char"
+        : (W.flags & (1 << (2 + r))) ? "inferred" : "cedict");
     }
     return {
       word, word_trad: null, length: L, freq: W.freq, tier: W.tier,

@@ -106,6 +106,7 @@ function loadPage() {
 ;globalThis.__page = {
   init(engine, structures, liushu){
     ENG = engine; STRUCTURES = structures; LIUSHU = liushu;
+    HAN_RANGES = engine.T.query.han_ranges;   // 真 boot 从同一处取
     boot = async () => {};          // 真 boot 要 fetch 词库；这里已经装好了
     init();
     syncFromDsl();                  // 真 boot 的尾巴
@@ -113,6 +114,8 @@ function loadPage() {
   probe(){
     return { locked: formLocked, note: $("#form-note").textContent,
              dsl: $("#dsl").value, slots: slots.map(slotToDsl),
+             kinds: slots.map(s => s.kind), labels: slots.map((s, i) => slotLabel(i)),
+             addStar: $("#add-star").disabled,
              notice: $("#parse-notice").innerHTML };
   },
   syncFromDsl, syncFromForm, applyInput, slotsOf: () => slots,

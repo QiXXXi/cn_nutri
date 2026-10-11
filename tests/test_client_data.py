@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import struct
 import sys
+from collections import Counter
 
 import pytest
 
@@ -97,6 +98,31 @@ def test_check_finds_no_mismatch(built):
     """check() 会验：字符表每个字段、每套读音、以及据此**现算**的 sort_aux
     和 pinyin_display。后者是省掉那 7 MB 的前提，不能只靠「应该能推出来」。"""
     assert bcd.check(built, DB) == []
+
+
+def test_char_freq_excludes_single_char_words(built):
+    """语料字频**不**累加单字词自己的词频。
+
+    客户端不存 sort_aux（省 2.9 MB），是靠 chars.cfreq 现算的；而 build_db.py 那边
+    也用的是同一个数。两边都必须排除单字词——不然 6,857 个单字词会把自己的词频灌进
+    各自那一格，既有 36.8 万条多字词的 tie-break 顺序整体漂移。这是**成对**规则，所以
+    「只算多字词」得到的表必须相同，而「连单字词也算」得到的表必须**不同**：
+    只断言前一半的话，哪天两边一起改错，这条照样绿。
+    """
+    import sqlite3
+    con = sqlite3.connect(DB)
+    with_single: Counter = Counter()
+    without_single: Counter = Counter()
+    for w, f in con.execute("SELECT word, freq FROM words"):
+        if f <= 0:
+            continue
+        for c in w:
+            with_single[c] += f
+            if len(w) > 1:
+                without_single[c] += f
+    got = {chr(cp): built.cfreq[i] for i, cp in enumerate(built.cps)}
+    assert got == {c: without_single[c] for c in got}
+    assert got != {c: with_single[c] for c in got}, "单字词频被算进字频表了"
 
 
 def test_check_notices_a_tampered_bundle(built):

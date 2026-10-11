@@ -72,8 +72,8 @@
   "max_len": 12,
   "n_chars": 7533,
   "n_parts": 1569,
-  "n_syls": 1491,
-  "n_words": 368271,
+  "n_syls": 1559,
+  "n_words": 375804,
   "structures": [
    "上下",
    "上下结构，下边是不是水、小",
@@ -102,12 +102,12 @@
   ]
  },
  "meta": {
-  "built_at": "2026-10-09 12:53:02",
+  "built_at": "2026-10-11 23:58:21",
   "cedict_sha1": "beef74eeccf07ca1",
   "jieba_sha1": "996ce5ef6d6e5c5d",
   "n_chars": "7533",
-  "n_readings": "368587",
-  "n_words": "368271",
+  "n_readings": "380133",
+  "n_words": "375804",
   "struct_missing": "9",
   "unihan_sha1": "7e5c96c73139887d"
  },
@@ -496,5 +496,5 @@
  "search": {
   "max_results": 2000
  },
- "version": 1
+ "version": 2
 }

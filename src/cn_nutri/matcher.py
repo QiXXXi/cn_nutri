@@ -47,7 +47,7 @@ class CharInfo(NamedTuple):
 class Word(NamedTuple):
     word: str
     reads: tuple[tuple[Syllable, ...], ...]   # 多套读音，每套逐音节
-    read_sources: tuple[str, ...]             # cedict | inferred
+    read_sources: tuple[str, ...]             # cedict | inferred | char
     freq: int
     tier: int
     sort_aux: float

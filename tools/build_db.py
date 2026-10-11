@@ -297,6 +297,12 @@ def parse_cedict() -> tuple[list[tuple], Counter]:
 
 
 def load_jieba() -> dict[str, int]:
+    """jieba 词频，**只收词长 >= MIN_LEN 的那些**。
+
+    单字条目请用 :func:`load_jieba_single`。两张表必须分开拿，理由见 ``build()``
+    里 ``char_freq`` 那段注释：单字频一旦混进词的成员集合或字频表，
+    既有 36.8 万条多字词的 id、字表、排序全都会动，而这次改动并不需要它们动。
+    """
     freq: dict[str, int] = {}
     path = os.path.join(RAW, "jieba", "jieba-master", "jieba", "dict.txt")
     for line in open(path, encoding="utf-8"):
@@ -305,6 +311,25 @@ def load_jieba() -> dict[str, int]:
             continue
         w = parts[0]
         if MIN_LEN <= len(w) <= MAX_LEN and all(is_han(c) for c in w):
+            freq[w] = max(freq.get(w, 0), int(parts[1]))
+    return freq
+
+
+def load_jieba_single() -> dict[str, int]:
+    """jieba 里**单字**的词频，给单字词取词频用（见 ``build()`` 的词表循环）。
+
+    返回的是 jieba 全部单字条目（一万多条），比语料的字表大——不要紧：
+    只有 ``all_words`` 里的词会来查它，而 ``all_words`` 里的单字恰好就是语料那
+    7,533 个字。**绝不要**拿它去建 ``chars_needed`` 或 ``char_freq``。
+    """
+    freq: dict[str, int] = {}
+    path = os.path.join(RAW, "jieba", "jieba-master", "jieba", "dict.txt")
+    for line in open(path, encoding="utf-8"):
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        w = parts[0]
+        if len(w) == 1 and is_han(w):
             freq[w] = max(freq.get(w, 0), int(parts[1]))
     return freq
 
@@ -326,10 +351,12 @@ def build(verbose: bool = True) -> dict:
     ids_table = {**mm_ids, **zt_ids}
     cedict, pos_counts = parse_cedict()
     jieba_freq = load_jieba()
+    jieba_single = load_jieba_single()
     log(f"载入: Unihan {len(strokes_u)} 字, pinyin-data {len(pinyin_data)} 字, "
         f"汉典 {len(zdic)} 字, IDS {len(ids_table)} 字"
         f"（字统网 {len(zt_ids)} + makemeahanzi {len(mm_ids)}，字统网优先）, "
-        f"CEDICT {len(cedict)} 词, jieba {len(jieba_freq)} 词")
+        f"CEDICT {len(cedict)} 词, jieba {len(jieba_freq)} 词"
+        f"（另有单字条目 {len(jieba_single)} 个，只用于给单字词取词频）")
 
     # ---- 单字表 ----
     chars_needed: set[str] = set()
@@ -373,6 +400,12 @@ def build(verbose: bool = True) -> dict:
     log(f"结构数据缺失 {struct_missing} 字（不参与结构筛选，结果页会提示）")
 
     # ---- 字频（用于零频词兜底排序）----
+    # **故意**只用多字词累加：这个值进 sort_aux，是 37.6 万条词的 tie-break 项。
+    # 把单字词频也算进来，既有词的相对顺序会整体漂移，而这次改动并不需要它漂
+    #（单字词自己的次序同样会变，但那是顺带的副作用，不是理由）——所以
+    # jieba_freq（>=MIN_LEN 视图）在这里是**必须**的，
+    # 不是随手拿的。客户端那边的同一份数由 build_client_data.py 从词表反推，
+    # 它也得跟着排除单字，两处成对，别只改一边。
     char_freq: Counter = Counter()
     for w, f in jieba_freq.items():
         for c in w:
@@ -381,7 +414,10 @@ def build(verbose: bool = True) -> dict:
     # ---- 词表 ----
     cedict_map = {w: (trad, reads, definition, idiom)
                   for w, trad, reads, definition, idiom in cedict}
-    all_words = set(cedict_map) | set(jieba_freq)
+    # 单字词只从 chars_needed 加：它就是「出现在词里的那些字」，也正是 chars 表的
+    # 全部成员（见上）。所以加完字表不多不少一个字节都不动；
+    # 换成 jieba 的全部单字条目就会多出语料外的字，cidx 立刻 KeyError。
+    all_words = set(cedict_map) | set(jieba_freq) | chars_needed
 
     def infer_reading(word: str) -> tuple[Syllable, ...]:
         """jieba 独有词：逐位置取联合概率最高的读音。
@@ -408,11 +444,23 @@ def build(verbose: bool = True) -> dict:
     wid = 0
     stats = Counter()
     for w in sorted(all_words):
-        freq = jieba_freq.get(w, 0)
+        # 单字词的词频只在 jieba_single 里（jieba_freq 按词长裁掉了单字）
+        freq = jieba_freq.get(w) or jieba_single.get(w, 0)
         in_cedict = w in cedict_map
         if in_cedict:
             trad, reads, definition, idiom = cedict_map[w]
             sources = ["cedict"] * len(reads)
+        elif len(w) == 1:
+            # 单字词：**没有词级语境**，读音就是这个字本身的歧义——全部收下，
+            # 一套都不挑。所以「行」被 [ang]/[ing]/[~2] 各命中一次，
+            # 「和」的 hé/huó/huò/hú 各归各的查询：任一套满足即命中。
+            # 绝不能走下面 infer_reading（它只给**一套**，等于替用户猜）。
+            trad, definition, idiom = None, "", False
+            reads = tuple((s,) for s in pinyin_data.get(w, ()))
+            sources = ("char",) * len(reads)
+            stats["char_readings"] += 1
+            if not reads:
+                stats["no_reading"] += 1
         else:
             trad, definition, idiom = None, "", False
             inf = infer_reading(w)
@@ -439,7 +487,8 @@ def build(verbose: bool = True) -> dict:
 
     log(f"词表 {len(rows)} 条：CEDICT {len(cedict_map)}，jieba 独有 "
         f"{len(all_words) - len(cedict_map)}（其中推定读音 {stats['inferred']}，"
-        f"无读音可用 {stats['no_reading']}）")
+        f"无读音可用 {stats['no_reading']}）；单字词 {stats['char_readings']} 条，"
+        f"读音全取（多音字按任一套满足即命中）")
 
     # ---- 写库 ----
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
